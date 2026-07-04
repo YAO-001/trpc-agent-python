@@ -15,12 +15,75 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import Callable
 from typing import Coroutine
 
-from nanobot.heartbeat import service as heartbeat_service_package
+try:
+    from nanobot.heartbeat import service as heartbeat_service_package
+except ModuleNotFoundError:
+
+    class _FallbackHeartbeatService:
+        """Minimal heartbeat base for nanobot versions without heartbeat."""
+
+        def __init__(
+            self,
+            workspace: Path,
+            provider: Any,
+            model: str,
+            on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+            on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+            interval_s: int = 30 * 60,
+            enabled: bool = True,
+        ):
+            self.workspace = Path(workspace)
+            self.provider = provider
+            self.model = model
+            self.on_execute = on_execute
+            self.on_notify = on_notify
+            self.interval_s = interval_s
+            self.enabled = enabled
+            self._task: asyncio.Task | None = None
+
+        async def start(self) -> None:
+            if not self.enabled or self._task is not None:
+                return
+            self._task = asyncio.create_task(self._run_loop())
+
+        def stop(self) -> None:
+            if self._task is None:
+                return
+            self._task.cancel()
+            self._task = None
+
+        async def _run_loop(self) -> None:
+            while True:
+                await asyncio.sleep(self.interval_s)
+                with suppress(Exception):
+                    await self._run_once()
+
+        async def _run_once(self) -> None:
+            heartbeat_file = self.workspace / "HEARTBEAT.md"
+            if not heartbeat_file.exists():
+                return
+
+            content = heartbeat_file.read_text(encoding="utf-8")
+            action, tasks = await self._decide(content)
+            if action != "run" or not tasks or self.on_execute is None:
+                return
+
+            response = await self.on_execute(tasks)
+            if self.on_notify is not None:
+                await self.on_notify(response)
+
+        async def _decide(self, content: str) -> tuple[str, str]:
+            return "skip", ""
+
+    heartbeat_service_package = SimpleNamespace(HeartbeatService=_FallbackHeartbeatService)
 from trpc_agent_sdk.models import LLMModel
 from trpc_agent_sdk.models import LlmRequest
 from trpc_agent_sdk.types import Content

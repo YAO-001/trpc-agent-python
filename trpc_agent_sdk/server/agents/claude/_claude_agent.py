@@ -117,7 +117,7 @@ class ClaudeAgent(BaseAgent):
     the proxy server.
     """
 
-    claude_agent_options: Optional[ClaudeAgentOptions] = None
+    claude_agent_options: Optional[Any] = None
     """Optional ClaudeAgentOptions to configure the agent.
 
     These options will be merged with the agent's model, instruction, and tools properties.

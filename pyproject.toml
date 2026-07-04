@@ -66,9 +66,15 @@ langfuse=[
     "opentelemetry-exporter-otlp-proto-http<2.0.0,>=1.28.0",
 ]
 openclaw = [
+    # nanobot requires websockets>=16,<17, while langgraph>=1.2.3 pulls
+    # langgraph-sdk>=0.4.0, which requires websockets<16.
+    "langchain<1.3.3",
+    "langgraph<1.2.3",
+    "langgraph-sdk<0.4.0",
+    "websockets>=16.0,<17.0",
     "nanobot-ai>=0.1.4.post5",
-     "aiofiles",
-     "wecom-aibot-sdk-python>=0.1.5",
+    "aiofiles",
+    "wecom-aibot-sdk-python>=0.1.5",
 ]
 knowledge = [
     "numpy>=2.2.5",
@@ -147,6 +153,11 @@ all = [
     "rouge-score",
     "pandas",
     "tabulate",
+    # Keep the all extra resolvable with OpenClaw's nanobot dependency.
+    "langchain<1.3.3",
+    "langgraph<1.2.3",
+    "langgraph-sdk<0.4.0",
+    "websockets>=16.0,<17.0",
     "anfs>=0.0.3",
     "mem0ai>=1.0.3",
     "mempalace>=3.3.3",
