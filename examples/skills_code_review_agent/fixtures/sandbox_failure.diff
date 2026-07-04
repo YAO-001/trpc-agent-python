@@ -1,0 +1,10 @@
+diff --git a/src/sandbox_target.py b/src/sandbox_target.py
+index 1111111..2222222 100644
+--- a/src/sandbox_target.py
++++ b/src/sandbox_target.py
+@@ -1,4 +1,7 @@
+ def normalize(value):
++    if value is None:
++        return ""
+     return str(value).strip()
+

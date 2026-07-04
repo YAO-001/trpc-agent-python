@@ -1,0 +1,16 @@
+diff --git a/src/payments.py b/src/payments.py
+index 1111111..2222222 100644
+--- a/src/payments.py
++++ b/src/payments.py
+@@ -1,5 +1,10 @@
+ def total(items):
+     return sum(item.amount for item in items)
+ 
++def apply_discount(total_amount, percent):
++    if percent <= 0:
++        return total_amount
++    return total_amount * (1 - percent / 100)
++
+ def currency():
+     return "USD"
+

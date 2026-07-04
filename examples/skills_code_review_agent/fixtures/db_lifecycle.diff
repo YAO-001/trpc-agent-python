@@ -1,0 +1,19 @@
+diff --git a/app/repository.py b/app/repository.py
+index 1111111..2222222 100644
+--- a/app/repository.py
++++ b/app/repository.py
+@@ -1,8 +1,22 @@
+ import sqlite3
+ from sqlalchemy.orm import Session
+ 
+ def save_user(engine, payload):
++    conn = sqlite3.connect("app.db")
++    remote = engine.connect()
++    session = Session()
++    tx = conn.begin()
++    try:
++        conn.execute("insert into users(name) values (?)", (payload["name"],))
++    except Exception:
++        raise
+     return True
+

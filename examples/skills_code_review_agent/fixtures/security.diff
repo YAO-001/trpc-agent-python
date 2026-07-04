@@ -1,0 +1,19 @@
+diff --git a/app/handlers.py b/app/handlers.py
+index 1111111..2222222 100644
+--- a/app/handlers.py
++++ b/app/handlers.py
+@@ -1,8 +1,18 @@
+ import pickle
+ import subprocess
+ import yaml
+ 
+ def handle_request(request, cursor):
+     user_id = request.args["user_id"]
++    subprocess.run(request.args["cmd"], shell=True)
++    result = eval(request.args["expr"])
++    cursor.execute(f"SELECT * FROM users WHERE id = {request.args['user_id']}")
++    config = yaml.load(request.data)
++    profile = pickle.loads(request.body)
+     cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+     return {"ok": True}
+

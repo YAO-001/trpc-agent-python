@@ -1,0 +1,6 @@
+review.db
+review.db-*
+outputs/fixtures/
+__pycache__/
+*.pyc
+

@@ -1,0 +1,505 @@
+{
+  "conclusion": "High-confidence issues require changes before merge.",
+  "database_query": "python examples/skills_code_review_agent/run_review.py query --db-url sqlite:///examples/skills_code_review_agent/review.db --task-id review_21a71a142ea4d1b0",
+  "filter_intercepts": [],
+  "findings": [
+    {
+      "category": "async_resource",
+      "confidence": 0.86,
+      "dedupe_key": "b513cb7e6ef8f98dbf15301b703d1a0e87848817bb0c1f83fd506b0bc24ce11b",
+      "evidence": "session = aiohttp.ClientSession()",
+      "file": "app/async_worker.py",
+      "line": 5,
+      "recommendation": "Use async with aiohttp.ClientSession(...) or close the session in a finally block.",
+      "severity": "medium",
+      "source": [
+        "rule:async_resource"
+      ],
+      "title": "aiohttp ClientSession is not closed"
+    },
+    {
+      "category": "async_resource",
+      "confidence": 0.84,
+      "dedupe_key": "1e5b782139804afdef3f3c8aa0618db5afa8523f58b8774d86fa088795bcc994",
+      "evidence": "f = open(path, \"w\")",
+      "file": "app/async_worker.py",
+      "line": 8,
+      "recommendation": "Use with open(...) as f so the descriptor is closed on every path.",
+      "severity": "medium",
+      "source": [
+        "rule:async_resource"
+      ],
+      "title": "file handle opened without a context manager"
+    },
+    {
+      "category": "security",
+      "confidence": 0.96,
+      "dedupe_key": "4a894f070d56d087b2e87e34682786a59b114e72f297eab32b7b2d130bb8cea4",
+      "evidence": "subprocess.run(request.args[\"cmd\"], shell=True)",
+      "file": "app/handlers.py",
+      "line": 7,
+      "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "subprocess invoked with shell=True"
+    },
+    {
+      "category": "security",
+      "confidence": 0.92,
+      "dedupe_key": "949ec8ed9d639f7939367f3a5da235dc0c7b0f6f34d179556c5cb92afc4ad048",
+      "evidence": "result = eval(request.args[\"expr\"])",
+      "file": "app/handlers.py",
+      "line": 8,
+      "recommendation": "Replace eval/exec with a parser or an allowlisted command table.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "dynamic code execution on request-controlled data"
+    },
+    {
+      "category": "security",
+      "confidence": 0.91,
+      "dedupe_key": "0338d12306633cb5949ccc92f5c0b675d21f215ccfdfd02024bd1463b5a52985",
+      "evidence": "cursor.execute(f\"SELECT * FROM users WHERE id = {request.args['user_id']}\")",
+      "file": "app/handlers.py",
+      "line": 9,
+      "recommendation": "Use parameterized SQL placeholders and pass user values separately.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "SQL query uses string interpolation with user data"
+    },
+    {
+      "category": "security",
+      "confidence": 0.9,
+      "dedupe_key": "5dc4127e57ab2abd4b13a3068ea7a92f09ab5e4b7fdc37028bbcdb5cde67a945",
+      "evidence": "config = yaml.load(request.data)",
+      "file": "app/handlers.py",
+      "line": 10,
+      "recommendation": "Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "yaml.load used without SafeLoader"
+    },
+    {
+      "category": "security",
+      "confidence": 0.93,
+      "dedupe_key": "ff1498fff1cc6cbeff180fae041dc7dc3f72287b2e65144f1acff85c2867a85d",
+      "evidence": "profile = pickle.loads(request.body)",
+      "file": "app/handlers.py",
+      "line": 11,
+      "recommendation": "Do not unpickle untrusted input; use a safe serialization format such as JSON.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "pickle.loads called on request-controlled data"
+    },
+    {
+      "category": "database",
+      "confidence": 0.86,
+      "dedupe_key": "e4d1d30fc7a1bcc5784b5af64f246eb843d5213910a85845224460493a7a0f0c",
+      "evidence": "conn = sqlite3.connect(\"app.db\")",
+      "file": "app/repository.py",
+      "line": 5,
+      "recommendation": "Use a context manager or close the connection/session in a finally block.",
+      "severity": "medium",
+      "source": [
+        "rule:database"
+      ],
+      "title": "database connection/session is not closed"
+    },
+    {
+      "category": "database",
+      "confidence": 0.86,
+      "dedupe_key": "c689b952e78c2ea905fc9a7d242d3627d12ad5c79185423d25569ea543044bcf",
+      "evidence": "remote = engine.connect()",
+      "file": "app/repository.py",
+      "line": 6,
+      "recommendation": "Use a context manager or close the connection/session in a finally block.",
+      "severity": "medium",
+      "source": [
+        "rule:database"
+      ],
+      "title": "database connection/session is not closed"
+    },
+    {
+      "category": "database",
+      "confidence": 0.86,
+      "dedupe_key": "5088c01c8e062c10285d718f6dd08423f36e8ca2d9f429e15125bdec90a51678",
+      "evidence": "session = Session()",
+      "file": "app/repository.py",
+      "line": 7,
+      "recommendation": "Use a context manager or close the connection/session in a finally block.",
+      "severity": "medium",
+      "source": [
+        "rule:database"
+      ],
+      "title": "database connection/session is not closed"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "878edb8e07dc8819cfe94f8a8daa10db4c0c19d3229d5a11b8aa3d8ebb2d45e2",
+      "evidence": "AWS_ACCESS_KEY_ID = \"[REDACTED:SECRET:aws_access_key:1a5d44a2]\"",
+      "file": "config/settings.py",
+      "line": 2,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:aws_access_key",
+        "rule:secret"
+      ],
+      "title": "aws_access_key secret added to source"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "8de36124e4c3c2a8a9d4e23dd9d4a4e909e80f32e41f2cd9a1835779bc7a13cd",
+      "evidence": "GITHUB_TOKEN = \"[REDACTED:SECRET:github_token:d73541f5]\"",
+      "file": "config/settings.py",
+      "line": 3,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:github_token",
+        "rule:secret"
+      ],
+      "title": "github_token secret added to source"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "57a89ba7d85f4d3656439204a8e9cdec953b8849ee0d96d7affc574ba1117d18",
+      "evidence": "OPENAI_API_KEY = \"[REDACTED:SECRET:openai_key:2dfacb42]\"",
+      "file": "config/settings.py",
+      "line": 4,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:openai_key",
+        "rule:secret"
+      ],
+      "title": "openai_key secret added to source"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "7d486866cd13e364c848257d956cca27034300ba30c9657876573be25ecd5c2f",
+      "evidence": "JWT_SAMPLE = \"[REDACTED:SECRET:jwt:3908a066]\"",
+      "file": "config/settings.py",
+      "line": 5,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:jwt",
+        "rule:secret"
+      ],
+      "title": "jwt secret added to source"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "376e290b58ba7b3ecd0f7da17bd55898bd3b80824c0e48e67e5e15b5f026333a",
+      "evidence": "password = \"[REDACTED:SECRET:generic_assignment:87cbebfe]\"",
+      "file": "config/settings.py",
+      "line": 6,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:generic_assignment",
+        "rule:secret"
+      ],
+      "title": "generic_assignment secret added to source"
+    },
+    {
+      "category": "secret",
+      "confidence": 0.99,
+      "dedupe_key": "dd85d52edbc9241f31f5f05667726b559fab49af9853de472c17f73c1a00fdf6",
+      "evidence": "private_key = \"[REDACTED:SECRET:pem_private_key:4b420350]\"",
+      "file": "config/settings.py",
+      "line": 7,
+      "recommendation": "Remove the secret from source, rotate it, and load it from a managed secret store.",
+      "severity": "high",
+      "source": [
+        "redactor:pem_private_key",
+        "rule:secret"
+      ],
+      "title": "pem_private_key secret added to source"
+    },
+    {
+      "category": "security",
+      "confidence": 0.96,
+      "dedupe_key": "3ca718ce94429cafa6f45cb54961be4bfec4aa7df2d610d14112dea095ee5eb8",
+      "evidence": "subprocess.run(request.args[\"cmd\"], shell=True)",
+      "file": "tools/runner.py",
+      "line": 4,
+      "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "subprocess invoked with shell=True"
+    },
+    {
+      "category": "security",
+      "confidence": 0.96,
+      "dedupe_key": "ec65a22a161c92ef8a83de2cfeda21ae73e9d9bc235b1e19bd6aeff2a9417186",
+      "evidence": "subprocess.run(request.args[\"cmd\"], shell=True)",
+      "file": "tools/runner.py",
+      "line": 5,
+      "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
+      "severity": "high",
+      "source": [
+        "rule:security"
+      ],
+      "title": "subprocess invoked with shell=True"
+    }
+  ],
+  "input_summary": {
+    "changed_files": [
+      "src/calculator.py",
+      "tests/test_calculator.py",
+      "app/handlers.py",
+      "app/async_worker.py",
+      "app/repository.py",
+      "src/payments.py",
+      "tools/runner.py",
+      "src/sandbox_target.py",
+      "config/settings.py"
+    ],
+    "effective_runtime": "local",
+    "fixtures": [
+      "clean",
+      "security",
+      "async_resource_leak",
+      "db_lifecycle",
+      "missing_tests",
+      "duplicate_finding",
+      "sandbox_failure",
+      "secret_redaction"
+    ],
+    "input_ref": "fixture:all",
+    "input_type": "fixture"
+  },
+  "needs_human_review": [
+    {
+      "category": "sandbox",
+      "confidence": 1.0,
+      "file": "",
+      "line": 0,
+      "message": "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: ",
+      "needs_human_review": true,
+      "source": [
+        "sandbox_runner"
+      ],
+      "title": "sandbox command failed"
+    },
+    {
+      "category": "async_resource",
+      "confidence": 0.74,
+      "file": "app/async_worker.py",
+      "line": 11,
+      "message": "await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block.",
+      "needs_human_review": true,
+      "source": [
+        "rule:async_resource"
+      ],
+      "title": "lock acquired without an obvious release"
+    },
+    {
+      "category": "database",
+      "confidence": 0.72,
+      "file": "app/repository.py",
+      "line": 8,
+      "message": "tx = conn.begin() Recommendation: Rollback in except/finally or use a transaction context manager.",
+      "needs_human_review": true,
+      "source": [
+        "rule:database"
+      ],
+      "title": "transaction begin lacks rollback on exception path"
+    }
+  ],
+  "recommendations": [
+    "Use async with aiohttp.ClientSession(...) or close the session in a finally block.",
+    "Use with open(...) as f so the descriptor is closed on every path.",
+    "Pass an argv list with shell=False and validate the executable explicitly.",
+    "Replace eval/exec with a parser or an allowlisted command table.",
+    "Use parameterized SQL placeholders and pass user values separately.",
+    "Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.",
+    "Do not unpickle untrusted input; use a safe serialization format such as JSON.",
+    "Use a context manager or close the connection/session in a finally block.",
+    "Remove the secret from source, rotate it, and load it from a managed secret store.",
+    "asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.",
+    "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: ",
+    "await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block."
+  ],
+  "redaction_summary": {
+    "by_type": {
+      "aws_access_key": 1,
+      "generic_assignment": 1,
+      "github_token": 1,
+      "jwt": 1,
+      "openai_key": 1,
+      "pem_private_key": 1
+    },
+    "events": [
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:aws_access_key:1a5d44a2]",
+        "secret_type": "aws_access_key",
+        "sha256": "1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3"
+      },
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:generic_assignment:87cbebfe]",
+        "secret_type": "generic_assignment",
+        "sha256": "87cbebfeebc05f7c54ac9336c4b4bbec831227a641951a4bde7edd56020f8590"
+      },
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:github_token:d73541f5]",
+        "secret_type": "github_token",
+        "sha256": "d73541f579ce99c68cf2ec87285e021760d306992f00c96b5d9e513d2037962c"
+      },
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:jwt:3908a066]",
+        "secret_type": "jwt",
+        "sha256": "3908a0662c6e684ad678756fac43a62e10f5a6fb23bdbd1778dd816edeb6f704"
+      },
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:openai_key:2dfacb42]",
+        "secret_type": "openai_key",
+        "sha256": "2dfacb4231b34bb49d21078789671c29b3e07f980cef969882a56ebe4450589b"
+      },
+      {
+        "count": 1,
+        "placeholder": "[REDACTED:SECRET:pem_private_key:4b420350]",
+        "secret_type": "pem_private_key",
+        "sha256": "4b4203503efa7fa28b23a72aed7c74b0cbecf17b7ca17a9850575d823e99ed8e"
+      }
+    ],
+    "total_redactions": 6
+  },
+  "report_paths": {
+    "json": "C:\\Users\\Wu\\Documents\\trpc\\trpc-agent-issue-92\\examples\\skills_code_review_agent\\outputs\\review_report.json",
+    "markdown": "C:\\Users\\Wu\\Documents\\trpc\\trpc-agent-issue-92\\examples\\skills_code_review_agent\\outputs\\review_report.md"
+  },
+  "sandbox_runs": [
+    {
+      "command": [
+        "python3",
+        "scripts/run_static_review.py",
+        "--input",
+        "work/inputs/review_input.json",
+        "--output",
+        "out/findings.json"
+      ],
+      "created_at": "1970-01-01T00:00:00+00:00",
+      "decision": "allow",
+      "duration_ms": 0,
+      "exit_code": 2,
+      "output_files": {
+        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"error\": \"intentional fixture sandbox failure\",\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"status\": \"failed\",\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+      },
+      "run_id": "sandbox_review_21a71a142ea4d1b0_1",
+      "runtime": "local",
+      "stderr": "",
+      "stdout": "",
+      "task_id": "review_21a71a142ea4d1b0",
+      "timed_out": false,
+      "warning": "sandbox command failed or timed out"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/secret_scan.py",
+        "--input",
+        "work/inputs/review_input.json",
+        "--output",
+        "out/secrets.json"
+      ],
+      "created_at": "1970-01-01T00:00:00+00:00",
+      "decision": "allow",
+      "duration_ms": 0,
+      "exit_code": 0,
+      "output_files": {
+        "out/secrets.json": "{\n  \"by_type\": {\n    \"aws_access_key\": 1,\n    \"generic_assignment\": 1,\n    \"github_token\": 1,\n    \"jwt\": 1,\n    \"openai_key\": 1,\n    \"pem_private_key\": 1\n  },\n  \"redacted_secret_placeholders\": 6,\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+      },
+      "run_id": "sandbox_review_21a71a142ea4d1b0_2",
+      "runtime": "local",
+      "stderr": "",
+      "stdout": "",
+      "task_id": "review_21a71a142ea4d1b0",
+      "timed_out": false,
+      "warning": ""
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/smoke_test.py",
+        "--input",
+        "work/inputs/review_input.json",
+        "--output",
+        "out/smoke.json"
+      ],
+      "created_at": "1970-01-01T00:00:00+00:00",
+      "decision": "allow",
+      "duration_ms": 0,
+      "exit_code": 0,
+      "output_files": {
+        "out/smoke.json": "{\n  \"message\": \"review input is well formed\",\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+      },
+      "run_id": "sandbox_review_21a71a142ea4d1b0_3",
+      "runtime": "local",
+      "stderr": "",
+      "stdout": "",
+      "task_id": "review_21a71a142ea4d1b0",
+      "timed_out": false,
+      "warning": ""
+    }
+  ],
+  "severity_distribution": {
+    "high": 13,
+    "medium": 5
+  },
+  "task_id": "review_21a71a142ea4d1b0",
+  "telemetry": {
+    "created_at": "1970-01-01T00:00:00+00:00",
+    "debug_dropped_count": 0,
+    "elapsed_ms": 0,
+    "files_changed": 9,
+    "filter_denied_count": 0,
+    "filter_needs_review_count": 0,
+    "findings_count": 18,
+    "lines_added": 43,
+    "needs_human_review_count": 3,
+    "redaction_count": 6,
+    "sandbox_failures_count": 1,
+    "sandbox_runs_count": 3,
+    "task_id": "review_21a71a142ea4d1b0",
+    "warnings_count": 1
+  },
+  "warnings": [
+    {
+      "category": "async_resource",
+      "confidence": 0.72,
+      "file": "app/async_worker.py",
+      "line": 10,
+      "message": "asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.",
+      "needs_human_review": false,
+      "source": [
+        "rule:async_resource"
+      ],
+      "title": "asyncio.create_task result is not tracked"
+    }
+  ]
+}

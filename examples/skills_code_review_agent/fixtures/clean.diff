@@ -1,0 +1,27 @@
+diff --git a/src/calculator.py b/src/calculator.py
+index 1111111..2222222 100644
+--- a/src/calculator.py
++++ b/src/calculator.py
+@@ -1,5 +1,8 @@
+ def add(left, right):
+     return left + right
+ 
++def subtract(left, right):
++    return left - right
++
+ def multiply(left, right):
+     return left * right
+diff --git a/tests/test_calculator.py b/tests/test_calculator.py
+index 3333333..4444444 100644
+--- a/tests/test_calculator.py
++++ b/tests/test_calculator.py
+@@ -1,5 +1,8 @@
+ from src.calculator import add
++from src.calculator import subtract
+ 
+ def test_add():
+     assert add(1, 2) == 3
++
++def test_subtract():
++    assert subtract(3, 2) == 1
+
