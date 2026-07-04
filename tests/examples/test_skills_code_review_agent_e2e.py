@@ -165,6 +165,27 @@ def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
     assert ("database", "database connection/session may not be closed") not in finding_keys
 
 
+def test_aiohttp_client_session_is_not_database_finding(tmp_path):
+    output = _run_static_review_script(
+        tmp_path,
+        {
+            "task_id": "aiohttp-only",
+            "changed_files": ["app/worker.py"],
+            "fixture_names": [],
+            "added_lines": [
+                {
+                    "file": "app/worker.py",
+                    "line": 5,
+                    "content": "session = aiohttp.ClientSession()",
+                }
+            ],
+        },
+    )
+
+    assert not any(item["category"] == "database" for item in output["findings"])
+    assert any(item["category"] == "async_resource" for item in output["findings"])
+
+
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'review.db'}"
     output_dir = tmp_path / "out"
@@ -230,6 +251,7 @@ def test_sandbox_failure_keeps_static_review_stable_without_test_marker(tmp_path
     static_run = next(run for run in report.sandbox_runs if "run_static_review.py" in " ".join(run.command))
     assert static_run.exit_code == 0
     assert any(warning.title == "sandbox smoke test failed" for warning in report.needs_human_review)
+    assert not any(warning.title == "sandbox command failed" for warning in report.needs_human_review)
 
 
 def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatch):

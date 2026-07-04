@@ -7,10 +7,10 @@
 
 ## Findings Summary
 
-- Findings: 20
+- Findings: 19
 - Warnings: 1
-- Needs human review: 4
-- Severity distribution: `{"high": 13, "medium": 7}`
+- Needs human review: 3
+- Severity distribution: `{"high": 13, "medium": 6}`
 
 ## Findings
 
@@ -21,14 +21,6 @@
 - Confidence: 0.86
 - Source: `rule:async_resource, run_static_review.py, skill-rule:aiohttp_session_lifecycle, skill:run_static_review`
 - Recommendation: Use async with aiohttp.ClientSession(...) or close the session in a finally block.
-
-### MEDIUM database: database connection/session may not be closed
-
-- Location: `app/async_worker.py:5`
-- Evidence: `session = aiohttp.ClientSession()`
-- Confidence: 0.82
-- Source: `run_static_review.py, skill-rule:database_lifecycle, skill:run_static_review`
-- Recommendation: Use a context manager or close the connection/session in a finally block.
 
 ### MEDIUM async_resource: file handle opened without a context manager
 
@@ -177,7 +169,6 @@
 ## Warnings And Human Review
 
 - warning: async_resource `app/async_worker.py:10` asyncio.create_task result is not tracked (confidence 0.72) - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
-- needs human review: sandbox `n/a` sandbox command failed (confidence 1.00) - python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out
 - needs human review: sandbox `n/a` sandbox smoke test failed (confidence 1.00) - sandbox_failure fixture intentionally returns a non-zero smoke-test status.
 - needs human review: async_resource `app/async_worker.py:11` lock acquired without an obvious release (confidence 0.74) - await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block.
 - needs human review: database `app/repository.py:8` transaction begin lacks rollback on exception path (confidence 0.72) - tx = conn.begin() Recommendation: Rollback in except/finally or use a transaction context manager.
@@ -213,7 +204,6 @@
 ## Executable Recommendations
 
 - Use async with aiohttp.ClientSession(...) or close the session in a finally block.
-- Use a context manager or close the connection/session in a finally block.
 - Use with open(...) as f so the descriptor is closed on every path.
 - Use with open(...) as f or close the file in a finally block.
 - Pass an argv list with shell=False and validate the executable explicitly.
@@ -221,6 +211,7 @@
 - Use parameterized SQL placeholders and pass user values separately.
 - Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.
 - Do not unpickle untrusted input; use a safe serialization format such as JSON.
+- Use a context manager or close the connection/session in a finally block.
 - Remove the secret from source, rotate it, and load it from a managed secret store.
 - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
-- python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out
+- sandbox_failure fixture intentionally returns a non-zero smoke-test status.

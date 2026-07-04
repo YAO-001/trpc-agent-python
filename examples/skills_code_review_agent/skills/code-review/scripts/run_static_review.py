@@ -20,6 +20,7 @@ _SUBPROCESS_SHELL_RE = re.compile(
 )
 _EVAL_EXEC_RE = re.compile(r"\b(?:eval|exec)\s*\(")
 _OPEN_RE = re.compile(r"(?<![\w.])open\s*\(")
+_SQLALCHEMY_SESSION_RE = re.compile(r"(?<![A-Za-z0-9_])Session\s*\(")
 _BUSINESS_PREFIXES = ("src/", "app/", "lib/", "package/")
 
 
@@ -101,6 +102,15 @@ def _is_business_python_file(path: str) -> bool:
     return normalized.endswith(".py") and normalized.startswith(_BUSINESS_PREFIXES) and not _is_test_file(normalized)
 
 
+def _is_database_lifecycle_candidate(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "sqlite3.connect(" in lower
+        or "engine.connect(" in lower
+        or bool(_SQLALCHEMY_SESSION_RE.search(text))
+    )
+
+
 def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     lines = [line for line in payload.get("added_lines", []) if isinstance(line, dict)]
     changed_files = [str(path) for path in payload.get("changed_files", [])]
@@ -137,7 +147,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                 )
             )
         if (
-            ("sqlite3.connect(" in lower or "engine.connect(" in lower or "session(" in lower)
+            _is_database_lifecycle_candidate(text)
             and not lower.startswith(("with ", "async with "))
             and not _has_lifecycle_signal(lines, line)
         ):

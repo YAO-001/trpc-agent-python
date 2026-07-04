@@ -138,6 +138,22 @@ def _failure_warning(run: SandboxRun) -> ReviewWarning:
     )
 
 
+def _run_has_human_review_artifact(run: SandboxRun) -> bool:
+    for content in run.output_files.values():
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        value = data.get("needs_human_review")
+        if isinstance(value, dict):
+            return True
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+            return True
+    return False
+
+
 def _runtime_warning(title: str, message: str) -> ReviewWarning:
     return ReviewWarning(
         category="sandbox",
@@ -483,10 +499,10 @@ class SandboxRunner:
                     )
                 )
 
-        for run in runs:
-            if run.exit_code != 0 or run.timed_out:
-                needs_human_review.append(_failure_warning(run))
         artifacts = load_sandbox_artifacts(runs)
+        for run in runs:
+            if (run.exit_code != 0 or run.timed_out) and not _run_has_human_review_artifact(run):
+                needs_human_review.append(_failure_warning(run))
         warnings.extend(artifacts.warnings)
         needs_human_review.extend(artifacts.needs_human_review)
         return SandboxResult(
