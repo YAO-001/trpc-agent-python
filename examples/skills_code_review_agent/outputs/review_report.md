@@ -10,7 +10,10 @@
 - Findings: 19
 - Warnings: 1
 - Needs human review: 3
-- Severity distribution: `{"high": 13, "medium": 6}`
+
+## Severity Stats
+
+- Distribution: `{"high": 13, "medium": 6}`
 
 ## Findings
 
@@ -166,20 +169,22 @@
 - Source: `rule:security, run_static_review.py, sandbox:run_static_review, skill-rule:subprocess_shell_true, skill:run_static_review`
 - Recommendation: Pass an argv list with shell=False and validate the executable explicitly.
 
-## Warnings And Human Review
+## Human Review
 
+- Warnings: 1
+- Needs human review: 3
 - warning: async_resource `app/async_worker.py:10` asyncio.create_task result is not tracked (confidence 0.72) - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
 - needs human review: sandbox `n/a` sandbox smoke test failed (confidence 1.00) - sandbox_failure fixture intentionally returns a non-zero smoke-test status.
 - needs human review: async_resource `app/async_worker.py:11` lock acquired without an obvious release (confidence 0.74) - await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block.
 - needs human review: database `app/repository.py:8` transaction begin lacks rollback on exception path (confidence 0.72) - tx = conn.begin() Recommendation: Rollback in except/finally or use a transaction context manager.
 
-## Filter Intercepts
+## Filter Summary
 
 - Denied: 0
 - Needs human review: 0
 
 
-## Sandbox Execution
+## Sandbox Summary
 
 - Runs: 3
 - Failures/timeouts: 1
@@ -190,7 +195,7 @@
 - `python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json` exit=0 timed_out=False stdout_truncated=False stderr_truncated=False output_truncated=False
 - `python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json` exit=2 timed_out=False stdout_truncated=False stderr_truncated=False output_truncated=False
 
-## Telemetry
+## Metrics
 
 - Files changed: 9
 - Added lines: 43
@@ -201,7 +206,7 @@
 
 - By type: `{"aws_access_key": 1, "generic_assignment": 1, "github_token": 1, "jwt": 1, "openai_key": 1, "pem_private_key": 1}`
 
-## Executable Recommendations
+## Recommendations
 
 - Use async with aiohttp.ClientSession(...) or close the session in a finally block.
 - Use with open(...) as f so the descriptor is closed on every path.

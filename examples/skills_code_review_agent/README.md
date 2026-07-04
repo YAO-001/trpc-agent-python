@@ -43,6 +43,26 @@ python examples/skills_code_review_agent/run_review.py query --db-url sqlite:///
 Running `run_review.py` without a subcommand defaults to
 `review --fixture all --dry-run --runtime local`.
 
+## Validation Commands
+
+```bash
+python -m pytest tests/examples -q
+```
+
+```bash
+python examples/skills_code_review_agent/run_review.py review --fixture all --dry-run --runtime local
+```
+
+```bash
+python examples/skills_code_review_agent/run_review.py eval-fixtures --dry-run --runtime local
+```
+
+Optional container runtime check for maintainers with Docker available:
+
+```bash
+python examples/skills_code_review_agent/run_review.py review --fixture security --dry-run --runtime container
+```
+
 ## Runtime Paths
 
 Container runtime is the default design target. `agent/agent_factory.py` shows
@@ -62,17 +82,18 @@ and telemetry record.
 
 ## Acceptance Matrix
 
-| Requirement | Implementation |
-| --- | --- |
-| 8 fixtures | `fixtures/*.diff` plus `eval-fixtures` writes `outputs/eval_summary.json` |
-| Default sandbox runtime | CLI defaults to `--runtime container`; `auto` prefers container |
-| Local fallback behavior | `LocalSkillHarness` is only selected by `--runtime local` or recorded `auto` fallback |
-| DB tables | `schema.sql` and `agent/storage.py` persist tasks, inputs, sandbox runs, findings, filter intercepts, telemetry, and reports |
-| Filter-before-execution | `ReviewExecutionPolicy` gates every sandbox command before local/container harness execution |
-| Timeout/output cap | sandbox stdout/stderr/output files are capped and record truncation plus output byte/file counts |
-| Secret redaction | diffs, sandbox streams, output artifacts, reports, and DB records are redacted before persistence |
-| Fake model/dry-run | no model API is required; dry-run uses deterministic timestamps and fixture task ids |
-| Report fields | JSON/Markdown include schema version, findings, warnings, filter intercepts, sandbox summary, telemetry, redaction summary, recommendations, and query command |
+| Requirement | Implementation | Test / Evidence |
+| --- | --- | --- |
+| 8 fixtures | `fixtures/*.diff` plus `eval-fixtures` writes `outputs/eval_summary.json` | `test_eval_fixtures_writes_summary`; `python examples/skills_code_review_agent/run_review.py eval-fixtures --dry-run --runtime local` |
+| Default sandbox runtime | CLI defaults to `--runtime container`; `auto` prefers container | `test_container_runtime_optional_integration_documented`; `test_auto_runtime_prefers_container_then_records_local_fallback` |
+| Local fallback behavior | `LocalSkillHarness` is only selected by `--runtime local` or recorded `auto` fallback | `test_auto_runtime_prefers_container_then_records_local_fallback` |
+| DB tables | `schema.sql` and `agent/storage.py` persist tasks, inputs, sandbox runs, findings, filter intercepts, telemetry, and reports | `test_query_task_returns_full_audit_chain`; `test_storage_roundtrip_by_task_id` |
+| Filter-before-execution | `ReviewExecutionPolicy` gates every sandbox command before local/container harness execution | `test_filter_deny_before_sandbox_execution`; `test_filter_deny_before_container_execution_is_persisted` |
+| Timeout/output cap | sandbox stdout/stderr/output files are capped and record truncation plus output byte/file counts | `test_local_sandbox_truncates_large_output_and_scrubs_env` |
+| Secret redaction | diffs, sandbox streams, output artifacts, reports, and DB records are redacted before persistence | `test_e2e_all_8_fixtures_and_secret_redaction`; `test_report_outputs_do_not_include_user_home_path` |
+| Fake model/dry-run | no model API is required; dry-run uses deterministic timestamps and fixture task ids | `test_eval_fixtures_writes_summary`; `python examples/skills_code_review_agent/run_review.py review --fixture all --dry-run --runtime local` |
+| Report fields | JSON/Markdown include schema version, findings summary, severity stats, human review, filter summary, metrics, sandbox summary, redaction summary, recommendations, and query command | `test_review_report_contains_required_sections` |
+| Hidden-like precision | static Skill script catches high-risk patterns while suppressing high findings on safe patterns | `test_hidden_like_precision_recall`; `test_hidden_like_safe_cases_do_not_emit_high_or_critical_findings` |
 
 ## Fixture Matrix
 

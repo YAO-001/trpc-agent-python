@@ -206,6 +206,7 @@ class ReviewReport(BaseModel):
     sandbox_runs: list[SandboxRun] = Field(default_factory=list)
     telemetry: TelemetrySummary
     severity_distribution: dict[str, int] = Field(default_factory=dict)
+    section_summary: dict[str, Any] = Field(default_factory=dict)
     redaction_summary: RedactionSummary = Field(default_factory=RedactionSummary)
     recommendations: list[str] = Field(default_factory=list)
     database_query: str = ""

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from pathlib import PurePosixPath
+from typing import Any
 
 from .models import FilterIntercept
 from .models import Finding
@@ -49,6 +50,47 @@ def _recommendations(findings: list[Finding], warnings: list[ReviewWarning]) -> 
             values.append(warning.message)
             seen.add(warning.message)
     return values[:12]
+
+
+def _section_summary(
+    *,
+    findings: list[Finding],
+    warnings: list[ReviewWarning],
+    needs_human_review: list[ReviewWarning],
+    filter_intercepts: list[FilterIntercept],
+    sandbox_runs: list[SandboxRun],
+    telemetry: TelemetrySummary,
+    severity_distribution: dict[str, int],
+    recommendations: list[str],
+) -> dict[str, Any]:
+    return {
+        "findings_summary": {
+            "findings": len(findings),
+            "warnings": len(warnings),
+            "needs_human_review": len(needs_human_review),
+        },
+        "severity_stats": severity_distribution,
+        "human_review": {
+            "warnings": len(warnings),
+            "needs_human_review": len(needs_human_review),
+        },
+        "filter_summary": {
+            "denied": telemetry.filter_denied_count,
+            "needs_human_review": telemetry.filter_needs_review_count,
+            "persisted_intercepts": len(
+                [item for item in filter_intercepts if item.decision in {"deny", "needs_human_review"}]
+            ),
+        },
+        "metrics": telemetry.model_dump(mode="json"),
+        "sandbox_summary": {
+            "runs": len(sandbox_runs),
+            "failures_or_timeouts": telemetry.sandbox_failures_count,
+            "stdout_truncated": telemetry.stdout_truncated_count,
+            "stderr_truncated": telemetry.stderr_truncated_count,
+            "output_truncated": telemetry.output_truncated_count,
+        },
+        "recommendations": recommendations,
+    }
 
 
 def _posix_path(path: Path) -> str:
@@ -95,6 +137,18 @@ class ReportBuilder:
             "python examples/skills_code_review_agent/run_review.py query "
             f"--db-url {self._display_db_url()} --task-id {task_id}"
         )
+        severity_distribution = _severity_distribution(findings)
+        recommendations = _recommendations(findings, warnings + needs_human_review)
+        section_summary = _section_summary(
+            findings=findings,
+            warnings=warnings,
+            needs_human_review=needs_human_review,
+            filter_intercepts=filter_intercepts,
+            sandbox_runs=sandbox_runs,
+            telemetry=telemetry,
+            severity_distribution=severity_distribution,
+            recommendations=recommendations,
+        )
         return ReviewReport(
             task_id=task_id,
             conclusion=_conclusion(findings, needs_human_review),
@@ -104,9 +158,10 @@ class ReportBuilder:
             filter_intercepts=[item for item in filter_intercepts if item.decision in {"deny", "needs_human_review"}],
             sandbox_runs=sandbox_runs,
             telemetry=telemetry,
-            severity_distribution=_severity_distribution(findings),
+            severity_distribution=severity_distribution,
+            section_summary=section_summary,
             redaction_summary=redaction_summary,
-            recommendations=_recommendations(findings, warnings + needs_human_review),
+            recommendations=recommendations,
             database_query=query_cmd,
             input_summary=input_summary,
         )
@@ -149,7 +204,10 @@ class ReportBuilder:
             f"- Findings: {len(report.findings)}",
             f"- Warnings: {len(report.warnings)}",
             f"- Needs human review: {len(report.needs_human_review)}",
-            f"- Severity distribution: `{json.dumps(report.severity_distribution, sort_keys=True)}`",
+            "",
+            "## Severity Stats",
+            "",
+            f"- Distribution: `{json.dumps(report.severity_distribution, sort_keys=True)}`",
             "",
         ]
         if report.findings:
@@ -167,19 +225,25 @@ class ReportBuilder:
                         "",
                     ]
                 )
-        if report.warnings or report.needs_human_review:
-            lines.extend(["## Warnings And Human Review", ""])
-            for warning in [*report.warnings, *report.needs_human_review]:
-                marker = "needs human review" if warning.needs_human_review else "warning"
-                location = f"{warning.file}:{warning.line}" if warning.file else "n/a"
-                lines.append(
-                    f"- {marker}: {warning.category} `{location}` {warning.title} "
-                    f"(confidence {warning.confidence:.2f}) - {warning.message}"
-                )
-            lines.append("")
         lines.extend(
             [
-                "## Filter Intercepts",
+                "## Human Review",
+                "",
+                f"- Warnings: {len(report.warnings)}",
+                f"- Needs human review: {len(report.needs_human_review)}",
+            ]
+        )
+        for warning in [*report.warnings, *report.needs_human_review]:
+            marker = "needs human review" if warning.needs_human_review else "warning"
+            location = f"{warning.file}:{warning.line}" if warning.file else "n/a"
+            lines.append(
+                f"- {marker}: {warning.category} `{location}` {warning.title} "
+                f"(confidence {warning.confidence:.2f}) - {warning.message}"
+            )
+        lines.append("")
+        lines.extend(
+            [
+                "## Filter Summary",
                 "",
                 f"- Denied: {report.telemetry.filter_denied_count}",
                 f"- Needs human review: {report.telemetry.filter_needs_review_count}",
@@ -191,7 +255,7 @@ class ReportBuilder:
         lines.extend(
             [
                 "",
-                "## Sandbox Execution",
+                "## Sandbox Summary",
                 "",
                 f"- Runs: {len(report.sandbox_runs)}",
                 f"- Failures/timeouts: {report.telemetry.sandbox_failures_count}",
@@ -209,7 +273,7 @@ class ReportBuilder:
         lines.extend(
             [
                 "",
-                "## Telemetry",
+                "## Metrics",
                 "",
                 f"- Files changed: {report.telemetry.files_changed}",
                 f"- Added lines: {report.telemetry.lines_added}",
@@ -220,7 +284,7 @@ class ReportBuilder:
                 "",
                 f"- By type: `{json.dumps(report.redaction_summary.by_type, sort_keys=True)}`",
                 "",
-                "## Executable Recommendations",
+                "## Recommendations",
                 "",
             ]
         )

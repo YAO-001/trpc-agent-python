@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,28 @@ RAW_SAMPLE_SECRETS = [
     "correct-horse-battery-staple",
     "FAKEKEYDATA",
 ]
+
+
+def test_acceptance_matrix_has_test_references():
+    readme = (EXAMPLE_DIR / "README.md").read_text(encoding="utf-8")
+    rows = []
+    in_matrix = False
+    for line in readme.splitlines():
+        if line.startswith("| Requirement |"):
+            in_matrix = True
+            continue
+        if in_matrix and not line.startswith("|"):
+            break
+        if not in_matrix or set(line.replace("|", "").strip()) <= {"-", " "}:
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows.append(cells)
+
+    assert rows
+    for cells in rows:
+        assert len(cells) >= 3
+        evidence = cells[2]
+        assert re.search(r"(test_|python -m pytest|run_review\.py)", evidence), cells
 
 
 def _run_static_review_script(tmp_path, payload):
@@ -278,6 +301,60 @@ def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):
         assert raw not in db_text
 
 
+def test_review_report_contains_required_sections(tmp_path):
+    output_dir = tmp_path / "out"
+    ReviewOrchestrator(db_url=f"sqlite:///{tmp_path / 'review.db'}", output_dir=output_dir).review(
+        fixture="all",
+        dry_run=True,
+        runtime="local",
+    )
+
+    report_json = json.loads((output_dir / "review_report.json").read_text(encoding="utf-8"))
+    markdown = (output_dir / "review_report.md").read_text(encoding="utf-8")
+
+    for key in [
+        "findings_summary",
+        "severity_stats",
+        "human_review",
+        "filter_summary",
+        "metrics",
+        "sandbox_summary",
+        "recommendations",
+    ]:
+        assert key in report_json["section_summary"]
+
+    for heading in [
+        "## Findings Summary",
+        "## Severity Stats",
+        "## Human Review",
+        "## Filter Summary",
+        "## Metrics",
+        "## Sandbox Summary",
+        "## Recommendations",
+    ]:
+        assert heading in markdown
+
+
+def test_query_task_returns_full_audit_chain(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'review.db'}"
+    report = ReviewOrchestrator(db_url=db_url, output_dir=tmp_path / "out").review(
+        fixture="security",
+        dry_run=True,
+        runtime="local",
+    )
+
+    rows = ReviewStorage(db_url).query_task(report.task_id)
+
+    assert rows["task"]["task_id"] == report.task_id
+    assert rows["input"]["task_id"] == report.task_id
+    assert rows["sandbox_runs"]
+    assert isinstance(rows["filter_intercepts"], list)
+    assert rows["telemetry"]["task_id"] == report.task_id
+    assert rows["findings"]
+    assert rows["reports"][0]["task_id"] == report.task_id
+    assert rows["report"]["task_id"] == report.task_id
+
+
 def test_eval_fixtures_writes_summary(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'review.db'}"
     output_dir = tmp_path / "out"
@@ -419,7 +496,10 @@ def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monke
     assert "sandbox:run_static_review" in sandbox_finding.source
 
 
-def test_container_runtime_real_skill_run_if_docker_available(tmp_path):
+def test_container_runtime_optional_integration_documented(tmp_path):
+    readme = (EXAMPLE_DIR / "README.md").read_text(encoding="utf-8")
+    assert "python examples/skills_code_review_agent/run_review.py review --fixture security --dry-run --runtime container" in readme
+
     try:
         result = subprocess.run(["docker", "info"], check=False, capture_output=True, text=True, timeout=20)
     except (FileNotFoundError, subprocess.TimeoutExpired):

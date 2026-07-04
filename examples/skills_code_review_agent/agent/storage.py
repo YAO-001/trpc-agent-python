@@ -332,6 +332,10 @@ class ReviewStorage:
             ]:
                 rows = conn.execute(select(table).where(table.c.task_id == task_id)).mappings().all()
                 result[name] = [dict(row) for row in rows]
+        result["task"] = result["review_tasks"][0] if result["review_tasks"] else {}
+        result["input"] = result["review_inputs"][0] if result["review_inputs"] else {}
+        result["telemetry"] = result["telemetry_summaries"][0] if result["telemetry_summaries"] else {}
+        result["report"] = result["reports"][0] if result["reports"] else {}
         return result
 
     def dump_task_text(self, task_id: str) -> str:

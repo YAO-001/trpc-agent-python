@@ -58,7 +58,20 @@ class SecretRedactor:
     @staticmethod
     def _is_dummy_assignment_value(value: str) -> bool:
         normalized = value.strip().strip("\"'").lower()
-        return normalized in {"changeme", "change-me", "example-token", "dummy-token", "placeholder"}
+        return any(
+            marker in normalized
+            for marker in (
+                "changeme",
+                "change-me",
+                "dummy",
+                "example",
+                "fixture",
+                "placeholder",
+                "sample",
+                "sk-test",
+                "test",
+            )
+        )
 
     def redact_text(self, text: str) -> RedactionResult:
         events: dict[tuple[str, str], RedactionEvent] = {}

@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from .dedupe import dedupe_findings
+from .diff_parser import is_test_file
 from .models import ChangedLine
 from .models import Finding
 from .models import ParsedDiff
@@ -22,6 +23,15 @@ from .rules_tests import run_test_rules
 
 
 _PLACEHOLDER_RE = re.compile(r"\[REDACTED:SECRET:(?P<type>[^:\]]+):(?P<hash>[a-f0-9]{8})\]")
+
+
+def _is_fixture_file(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return (
+        normalized.startswith("fixtures/")
+        or "/fixtures/" in normalized
+        or "fixture" in normalized.rsplit("/", 1)[-1]
+    )
 
 
 @dataclass
@@ -37,6 +47,8 @@ def _secret_findings(lines: list[ChangedLine]) -> list[Finding]:
     for line in lines:
         match = _PLACEHOLDER_RE.search(line.content)
         if not match:
+            continue
+        if is_test_file(line.file) or _is_fixture_file(line.file):
             continue
         secret_type = match.group("type")
         findings.append(

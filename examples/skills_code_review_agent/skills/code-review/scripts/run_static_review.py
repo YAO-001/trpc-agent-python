@@ -16,8 +16,10 @@ from typing import Any
 
 
 _SUBPROCESS_SHELL_RE = re.compile(
-    r"\bsubprocess\.(?:run|Popen|call|check_output)\s*\(.*\bshell\s*=\s*True\b"
+    r"\bsubprocess\.(?:run|Popen|call|check_output|check_call)\s*\(.*\bshell\s*=\s*True\b",
+    re.IGNORECASE,
 )
+_POPEN_SHELL_RE = re.compile(r"(?<![\w.])popen\s*\(.*\bshell\s*=\s*True\b", re.IGNORECASE)
 _EVAL_EXEC_RE = re.compile(r"\b(?:eval|exec)\s*\(")
 _OS_SYSTEM_RE = re.compile(r"\bos\.system\s*\(")
 _OPEN_RE = re.compile(r"(?<![\w.])open\s*\(")
@@ -27,7 +29,20 @@ _GENERIC_SECRET_ASSIGNMENT_RE = re.compile(
     r"\b(?:password|passwd|token|api_key|apikey|secret)\b\s*=\s*['\"]([^'\"]{8,})['\"]",
     re.IGNORECASE,
 )
-_BUSINESS_PREFIXES = ("src/", "app/", "lib/", "package/")
+_SQL_TOKEN_RE = re.compile(r"\b(select|insert|update|delete|where)\b", re.IGNORECASE)
+_SQL_NAMED_BIND_RE = re.compile(r":[A-Za-z_][A-Za-z0-9_]*")
+_PRODUCTION_PREFIXES = ("src/", "app/", "service/", "package/")
+_DUMMY_SECRET_MARKERS = (
+    "changeme",
+    "change-me",
+    "dummy",
+    "example",
+    "fixture",
+    "placeholder",
+    "sample",
+    "sk-test",
+    "test",
+)
 
 
 def _line_text(line: dict[str, Any]) -> str:
@@ -68,10 +83,19 @@ def _finding(
     }
 
 
-def _same_file_nearby(lines: list[dict[str, Any]], target: dict[str, Any], *, radius: int = 6) -> list[str]:
+def _context_values(line: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("context_before", "context_after"):
+        context = line.get(key) or []
+        if isinstance(context, list):
+            values.extend(str(item) for item in context)
+    return values
+
+
+def _same_file_nearby(lines: list[dict[str, Any]], target: dict[str, Any], *, radius: int = 8) -> list[str]:
     target_file = _line_file(target)
     target_line = _line_number(target)
-    nearby: list[str] = []
+    nearby: list[str] = [item.strip().lower() for item in _context_values(target)]
     for line in lines:
         if _line_file(line) != target_file:
             continue
@@ -85,7 +109,10 @@ def _has_lifecycle_signal(lines: list[dict[str, Any]], target: dict[str, Any]) -
     nearby = _same_file_nearby(lines, target)
     return any(
         ".close(" in text
+        or "close()" in text
         or "finally:" in text
+        or "contextlib.closing" in text
+        or "closing(" in text
         or text.startswith("with ")
         or text.startswith("async with ")
         for text in nearby
@@ -103,9 +130,18 @@ def _is_test_file(path: str) -> bool:
     )
 
 
+def _is_fixture_file(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return (
+        normalized.startswith("fixtures/")
+        or "/fixtures/" in normalized
+        or "fixture" in normalized.rsplit("/", 1)[-1]
+    )
+
+
 def _is_business_python_file(path: str) -> bool:
     normalized = path.replace("\\", "/").lower()
-    return normalized.endswith(".py") and normalized.startswith(_BUSINESS_PREFIXES) and not _is_test_file(normalized)
+    return normalized.endswith(".py") and normalized.startswith(_PRODUCTION_PREFIXES) and not _is_test_file(normalized)
 
 
 def _is_database_lifecycle_candidate(text: str) -> bool:
@@ -121,19 +157,43 @@ def _has_user_controlled_data(lower: str) -> bool:
     return any(marker in lower for marker in ("request", "user", "input", "args", "body", "data"))
 
 
+def _execute_args_text(text: str) -> str:
+    match = re.search(r"\bexecute\s*\((?P<args>.*)\)\s*$", text, re.IGNORECASE)
+    return match.group("args") if match else ""
+
+
+def _is_parameterized_execute(text: str, lower: str) -> bool:
+    if "execute(" not in lower:
+        return False
+    args_text = _execute_args_text(text)
+    if not args_text or "," not in args_text:
+        return False
+    if re.search(r"\bexecute\s*\([^,]+,\s*(?:\(|\[|\{)", text, re.IGNORECASE):
+        return True
+    if "?" in args_text and re.search(r",\s*(?:\(|\[)", args_text):
+        return True
+    if _SQL_NAMED_BIND_RE.search(args_text) and (
+        re.search(r",\s*(?:\{|\w)", args_text) or "bindparam(" in lower or ".bindparams(" in lower
+    ):
+        return True
+    return False
+
+
 def _is_sql_interpolation_candidate(text: str, lower: str) -> bool:
-    if "execute(" not in lower or "select" not in lower:
+    if "execute(" not in lower or not _SQL_TOKEN_RE.search(text):
+        return False
+    if _is_parameterized_execute(text, lower):
         return False
     if not _has_user_controlled_data(lower):
         return False
+    args_text = _execute_args_text(text)
     return (
         'execute(f"' in lower
         or "execute(f'" in lower
         or ".format(" in lower
         or " % " in text
-        or "+ request" in lower
-        or "+ user" in lower
-        or "+ input" in lower
+        or "%" in args_text
+        or bool(re.search(r"\+.*\b(request|user|input|args|body|data)\b", args_text, re.IGNORECASE))
     )
 
 
@@ -149,12 +209,39 @@ def _looks_like_placeholder_secret(text: str) -> bool:
     return _SECRET_PLACEHOLDER_RE.search(text) is not None
 
 
-def _looks_like_raw_secret_assignment(text: str) -> bool:
+def _secret_assignment_value(text: str) -> str | None:
     match = _GENERIC_SECRET_ASSIGNMENT_RE.search(text)
     if not match:
-        return False
-    value = match.group(1).lower()
-    return not any(marker in value for marker in ("example", "dummy", "test", "changeme", "placeholder"))
+        return None
+    return match.group(1)
+
+
+def _is_dummy_secret_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    return any(marker in normalized for marker in _DUMMY_SECRET_MARKERS)
+
+
+def _looks_like_raw_secret_assignment(text: str) -> bool:
+    value = _secret_assignment_value(text)
+    return value is not None and not _is_dummy_secret_value(value)
+
+
+def _looks_like_low_confidence_secret_assignment(text: str) -> bool:
+    value = _secret_assignment_value(text)
+    return value is not None and _is_dummy_secret_value(value)
+
+
+def _secret_warning(line: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "category": "secret",
+        "title": "placeholder secret-like value added to production code",
+        "message": "Secret-shaped test/example/changeme values should be confirmed as non-production credentials.",
+        "file": _line_file(line),
+        "line": _line_number(line),
+        "confidence": 0.58,
+        "needs_human_review": False,
+        "source": ["run_static_review.py", "skill-rule:low_confidence_secret"],
+    }
 
 
 def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -166,7 +253,8 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
     for line in lines:
         text = _line_text(line)
         lower = text.lower()
-        if _SUBPROCESS_SHELL_RE.search(text):
+        file_path = _line_file(line)
+        if _SUBPROCESS_SHELL_RE.search(text) or _POPEN_SHELL_RE.search(text):
             findings.append(
                 _finding(
                     line,
@@ -240,7 +328,10 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="pickle_loads",
                 )
             )
-        if _looks_like_placeholder_secret(text) or _looks_like_raw_secret_assignment(text):
+        is_secret_test_context = _is_test_file(file_path) or _is_fixture_file(file_path)
+        if not is_secret_test_context and (
+            _looks_like_placeholder_secret(text) or _looks_like_raw_secret_assignment(text)
+        ):
             findings.append(
                 _finding(
                     line,
@@ -252,6 +343,8 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="hardcoded_secret",
                 )
             )
+        elif not is_secret_test_context and _looks_like_low_confidence_secret_assignment(text):
+            warnings.append(_secret_warning(line))
         if (
             _is_database_lifecycle_candidate(text)
             and not lower.startswith(("with ", "async with "))
