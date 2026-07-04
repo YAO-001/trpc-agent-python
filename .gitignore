@@ -4,6 +4,8 @@
 *.lock
 *.log
 examples/*.log
+examples/skills_code_review_agent/review.db
+examples/skills_code_review_agent/*.db
 
 trpc-agent-py.egg-info
 
