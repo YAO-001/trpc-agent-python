@@ -35,6 +35,9 @@ def _source_for_path(path: str) -> str:
     normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
     if normalized in _ARTIFACT_SKILL_SOURCES:
         return _ARTIFACT_SKILL_SOURCES[normalized]
+    for suffix, source in _ARTIFACT_SKILL_SOURCES.items():
+        if normalized.endswith(f"/{suffix}"):
+            return source
     return f"skill:{PurePosixPath(normalized).stem or 'unknown'}"
 
 

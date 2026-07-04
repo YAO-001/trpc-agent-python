@@ -12,8 +12,10 @@ from pathlib import Path
 
 
 THIS_DIR = Path(__file__).resolve().parent
-if str(THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(THIS_DIR))
+REPO_ROOT = THIS_DIR.parents[1]
+for import_path in (REPO_ROOT, THIS_DIR):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
 from agent.cli import main  # noqa: E402
 

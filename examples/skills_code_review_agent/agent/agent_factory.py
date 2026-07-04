@@ -21,6 +21,7 @@ def create_skill_tool_set(runtime: str = "container"):
     from trpc_agent_sdk.code_executors import create_local_workspace_runtime
     from trpc_agent_sdk.skills import FsSkillRepository
     from trpc_agent_sdk.skills import SkillToolSet
+    from trpc_agent_sdk.skills.tools import CopySkillStager
 
     if runtime not in {"container", "local"}:
         raise ValueError(f"unsupported SkillToolSet runtime {runtime!r}")
@@ -33,6 +34,7 @@ def create_skill_tool_set(runtime: str = "container"):
         repository=repository,
         allowed_cmds=["python3"],
         run_tool_kwargs={"timeout": 60, "save_as_artifacts": False, "omit_inline_content": False},
+        skill_stager=CopySkillStager() if runtime == "container" else None,
     )
 
 
@@ -42,7 +44,7 @@ def _input_specs(input_path: str | None) -> list[dict[str, str]]:
     return [
         {
             "src": f"host://{Path(input_path).resolve().as_posix()}",
-            "dst": "work/inputs/review_input.json",
+            "dst": "skills/code-review/work/inputs/review_input.json",
             "mode": "copy",
         }
     ]
@@ -58,7 +60,7 @@ def build_skill_run_calls(input_path: str | None = None) -> list[dict[str, Any]]
                 "python3 scripts/run_static_review.py --input work/inputs/review_input.json "
                 "--output out/findings.json"
             ),
-            "output_files": ["out/findings.json"],
+            "output_files": ["skills/code-review/out/findings.json"],
             "inputs": inputs,
             "timeout": 30,
         },
@@ -66,7 +68,7 @@ def build_skill_run_calls(input_path: str | None = None) -> list[dict[str, Any]]
             "skill": "code-review",
             "cwd": "$SKILLS_DIR/code-review",
             "command": "python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json",
-            "output_files": ["out/secrets.json"],
+            "output_files": ["skills/code-review/out/secrets.json"],
             "inputs": inputs,
             "timeout": 30,
         },
@@ -74,7 +76,7 @@ def build_skill_run_calls(input_path: str | None = None) -> list[dict[str, Any]]
             "skill": "code-review",
             "cwd": "$SKILLS_DIR/code-review",
             "command": "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json",
-            "output_files": ["out/smoke.json"],
+            "output_files": ["skills/code-review/out/smoke.json"],
             "inputs": inputs,
             "timeout": 30,
         },
