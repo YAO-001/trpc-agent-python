@@ -20,6 +20,7 @@ from agent.filter_policy import ReviewExecutionPolicy
 from agent.input_resolver import EXAMPLE_DIR
 from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
+from agent.sandbox_artifact_loader import load_sandbox_artifacts
 from agent.sandbox_runner import HarnessExecutionResult
 from agent.sandbox_runner import SandboxRunner
 from agent.secret_redactor import SecretRedactor
@@ -155,6 +156,17 @@ def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
                 {"file": "app/safe.py", "line": 15, "content": "    pass"},
                 {"file": "app/safe.py", "line": 16, "content": "finally:"},
                 {"file": "app/safe.py", "line": 17, "content": "    conn.close()"},
+                {
+                    "file": "app/safe.py",
+                    "line": 18,
+                    "content": 'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
+                },
+                {
+                    "file": "app/safe.py",
+                    "line": 19,
+                    "content": 'subprocess.run(["python", "--version"], shell=False)',
+                },
+                {"file": "app/safe.py", "line": 20, "content": "async with aiohttp.ClientSession() as session:"},
             ],
         },
     )
@@ -163,6 +175,7 @@ def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
     assert ("security", "subprocess invoked with shell=True") not in finding_keys
     assert ("resource", "file handle may not be closed") not in finding_keys
     assert ("database", "database connection/session may not be closed") not in finding_keys
+    assert not any(item["severity"] == "high" for item in output["findings"])
 
 
 def test_aiohttp_client_session_is_not_database_finding(tmp_path):
@@ -184,6 +197,50 @@ def test_aiohttp_client_session_is_not_database_finding(tmp_path):
 
     assert not any(item["category"] == "database" for item in output["findings"])
     assert any(item["category"] == "async_resource" for item in output["findings"])
+
+
+def test_sandbox_artifact_invalid_schema_becomes_human_review_warning():
+    runs = [
+        SandboxRun(
+            run_id="sandbox_bad_json",
+            task_id="task-artifact",
+            runtime="local",
+            command=["python3", "scripts/run_static_review.py"],
+            output_files={"out/findings.json": "{not-json"},
+        ),
+        SandboxRun(
+            run_id="sandbox_bad_finding",
+            task_id="task-artifact",
+            runtime="local",
+            command=["python3", "scripts/run_static_review.py"],
+            output_files={
+                "out/findings.json": json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "severity": "urgent",
+                                "category": "security",
+                                "file": "app.py",
+                                "line": "not-a-line",
+                                "title": "bad finding",
+                                "evidence": "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+                                "recommendation": "fix",
+                                "confidence": 0.9,
+                            }
+                        ],
+                        "needs_human_review": True,
+                    }
+                )
+            },
+        ),
+    ]
+
+    artifacts = load_sandbox_artifacts(runs, redactor=SecretRedactor())
+
+    assert artifacts.findings == []
+    assert len(artifacts.needs_human_review) >= 3
+    assert all("AKIAIOSFODNN7EXAMPLE" not in warning.message for warning in artifacts.needs_human_review)
+    assert any("sandbox:run_static_review" in warning.source for warning in artifacts.needs_human_review)
 
 
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):
@@ -309,6 +366,59 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
     )
 
 
+def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monkeypatch):
+    class FakeTrpcSkillToolSetHarness:
+        def __init__(self, *, runtime, redactor):
+            self.runtime = runtime
+
+        def execute(self, *, task_id, review_input, commands, dry_run):
+            payload = {
+                "findings": [
+                    {
+                        "severity": "medium",
+                        "category": "sandbox",
+                        "file": "src/container_only.py",
+                        "line": 7,
+                        "title": "container-only review finding",
+                        "evidence": "artifact evidence",
+                        "recommendation": "Keep sandbox artifacts in final findings.",
+                        "confidence": 0.91,
+                        "source": "mock",
+                    }
+                ]
+            }
+            return HarnessExecutionResult(
+                runs=[
+                    SandboxRun(
+                        run_id=f"sandbox_{task_id}_1",
+                        task_id=task_id,
+                        runtime=self.runtime,
+                        command=commands[0],
+                        decision="allow",
+                        output_files={"out/findings.json": json.dumps(payload)},
+                        created_at="1970-01-01T00:00:00+00:00",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", FakeTrpcSkillToolSetHarness)
+    db_url = f"sqlite:///{tmp_path / 'review.db'}"
+    report = ReviewOrchestrator(db_url=db_url, output_dir=tmp_path / "out").review(
+        fixture="security",
+        dry_run=True,
+        runtime="container",
+    )
+    rows = ReviewStorage(db_url).query_task(report.task_id)
+    report_titles = {finding.title for finding in report.findings}
+    db_titles = {row["title"] for row in rows["findings"]}
+
+    assert "subprocess invoked with shell=True" in report_titles
+    assert "container-only review finding" in report_titles
+    assert report_titles.issubset(db_titles)
+    sandbox_finding = next(finding for finding in report.findings if finding.title == "container-only review finding")
+    assert "sandbox:run_static_review" in sandbox_finding.source
+
+
 def test_container_runtime_real_skill_run_if_docker_available(tmp_path):
     try:
         result = subprocess.run(["docker", "info"], check=False, capture_output=True, text=True, timeout=20)
@@ -393,6 +503,8 @@ def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypat
     assert run.output_truncated is True
     assert "raw-secret-value" not in run.stdout
     assert "raw-secret-value" not in json.dumps(run.output_files, sort_keys=True)
+    assert run.output_file_count == 1
+    assert run.output_bytes > 0
 
 
 def test_demo_filter_writes_public_deny_report_without_sandbox_run(tmp_path):
@@ -406,6 +518,28 @@ def test_demo_filter_writes_public_deny_report_without_sandbox_run(tmp_path):
     assert report.filter_intercepts
     assert report.filter_intercepts[0].decision == "deny"
     rows = ReviewStorage(db_url).query_task(report.task_id)
+    assert rows["sandbox_runs"] == []
+    assert rows["filter_intercepts"][0]["decision"] == "deny"
+
+
+def test_filter_deny_before_container_execution_is_persisted(tmp_path, monkeypatch):
+    class UnexpectedTrpcSkillToolSetHarness:
+        def __init__(self, *, runtime, redactor):
+            self.runtime = runtime
+
+        def execute(self, *, task_id, review_input, commands, dry_run):
+            raise AssertionError("container harness must not run denied commands")
+
+    monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", UnexpectedTrpcSkillToolSetHarness)
+    db_url = f"sqlite:///{tmp_path / 'review.db'}"
+
+    report = ReviewOrchestrator(db_url=db_url, output_dir=tmp_path / "out").demo_filter(
+        dry_run=True,
+        runtime="container",
+    )
+    rows = ReviewStorage(db_url).query_task(report.task_id)
+
+    assert report.sandbox_runs == []
     assert rows["sandbox_runs"] == []
     assert rows["filter_intercepts"][0]["decision"] == "deny"
 

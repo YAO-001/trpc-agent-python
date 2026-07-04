@@ -74,6 +74,9 @@ sandbox_runs = Table(
     Column("stdout_truncated", Boolean, nullable=False, default=False),
     Column("stderr_truncated", Boolean, nullable=False, default=False),
     Column("output_truncated", Boolean, nullable=False, default=False),
+    Column("output_file_count", Integer, nullable=False, default=0),
+    Column("output_bytes", Integer, nullable=False, default=0),
+    Column("failure_reason", Text, nullable=True),
     Column("warning", Text, nullable=False),
     Column("created_at", String(64), nullable=False),
 )
@@ -120,6 +123,7 @@ reports = Table(
     Column("markdown_report", Text, nullable=False),
     Column("json_path", Text, nullable=False),
     Column("markdown_path", Text, nullable=False),
+    Column("summary_json", Text, nullable=False, default="{}"),
     Column("created_at", String(64), nullable=False),
 )
 
@@ -147,6 +151,9 @@ class ReviewStorage:
             "stdout_truncated": "BOOLEAN NOT NULL DEFAULT 0",
             "stderr_truncated": "BOOLEAN NOT NULL DEFAULT 0",
             "output_truncated": "BOOLEAN NOT NULL DEFAULT 0",
+            "output_file_count": "INTEGER NOT NULL DEFAULT 0",
+            "output_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "failure_reason": "TEXT",
         }
         with self.engine.begin() as conn:
             rows = conn.execute(text("PRAGMA table_info(sandbox_runs)")).mappings().all()
@@ -154,6 +161,10 @@ class ReviewStorage:
             for column, definition in required.items():
                 if column not in existing:
                     conn.execute(text(f"ALTER TABLE sandbox_runs ADD COLUMN {column} {definition}"))
+            report_rows = conn.execute(text("PRAGMA table_info(reports)")).mappings().all()
+            report_columns = {row["name"] for row in report_rows}
+            if "summary_json" not in report_columns:
+                conn.execute(text("ALTER TABLE reports ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'"))
 
     def reset_task(self, task_id: str) -> None:
         with self.engine.begin() as conn:
@@ -233,6 +244,9 @@ class ReviewStorage:
                 "stdout_truncated": item.stdout_truncated,
                 "stderr_truncated": item.stderr_truncated,
                 "output_truncated": item.output_truncated,
+                "output_file_count": item.output_file_count,
+                "output_bytes": item.output_bytes,
+                "failure_reason": item.failure_reason or None,
                 "warning": item.warning,
                 "created_at": item.created_at,
             }
@@ -287,6 +301,19 @@ class ReviewStorage:
                     markdown_report=markdown_report,
                     json_path=json_path,
                     markdown_path=markdown_path,
+                    summary_json=json.dumps(
+                        {
+                            "conclusion": report.conclusion,
+                            "findings": len(report.findings),
+                            "warnings": len(report.warnings),
+                            "needs_human_review": len(report.needs_human_review),
+                            "filter_intercepts": len(report.filter_intercepts),
+                            "sandbox_runs": len(report.sandbox_runs),
+                            "schema_version": report.schema_version,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                     created_at=report.telemetry.created_at,
                 )
             )

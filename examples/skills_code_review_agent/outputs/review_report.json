@@ -15,6 +15,7 @@
       "source": [
         "rule:async_resource",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:aiohttp_session_lifecycle",
         "skill:run_static_review"
       ],
@@ -45,6 +46,7 @@
       "severity": "medium",
       "source": [
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:open_without_context",
         "skill:run_static_review"
       ],
@@ -62,6 +64,7 @@
       "source": [
         "rule:security",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:subprocess_shell_true",
         "skill:run_static_review"
       ],
@@ -79,6 +82,7 @@
       "source": [
         "rule:security",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:eval_exec",
         "skill:run_static_review"
       ],
@@ -94,7 +98,11 @@
       "recommendation": "Use parameterized SQL placeholders and pass user values separately.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:sql_interpolation",
+        "skill:run_static_review"
       ],
       "title": "SQL query uses string interpolation with user data"
     },
@@ -108,7 +116,11 @@
       "recommendation": "Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:yaml_load",
+        "skill:run_static_review"
       ],
       "title": "yaml.load used without SafeLoader"
     },
@@ -122,7 +134,11 @@
       "recommendation": "Do not unpickle untrusted input; use a safe serialization format such as JSON.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:pickle_loads",
+        "skill:run_static_review"
       ],
       "title": "pickle.loads called on request-controlled data"
     },
@@ -138,6 +154,7 @@
       "source": [
         "rule:database",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:database_lifecycle",
         "skill:run_static_review"
       ],
@@ -155,6 +172,7 @@
       "source": [
         "rule:database",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:database_lifecycle",
         "skill:run_static_review"
       ],
@@ -172,6 +190,7 @@
       "source": [
         "rule:database",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:database_lifecycle",
         "skill:run_static_review"
       ],
@@ -188,7 +207,11 @@
       "severity": "high",
       "source": [
         "redactor:aws_access_key",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "aws_access_key secret added to source"
     },
@@ -203,7 +226,11 @@
       "severity": "high",
       "source": [
         "redactor:github_token",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "github_token secret added to source"
     },
@@ -218,7 +245,11 @@
       "severity": "high",
       "source": [
         "redactor:openai_key",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "openai_key secret added to source"
     },
@@ -233,7 +264,11 @@
       "severity": "high",
       "source": [
         "redactor:jwt",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "jwt secret added to source"
     },
@@ -248,7 +283,11 @@
       "severity": "high",
       "source": [
         "redactor:generic_assignment",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "generic_assignment secret added to source"
     },
@@ -263,7 +302,11 @@
       "severity": "high",
       "source": [
         "redactor:pem_private_key",
-        "rule:secret"
+        "rule:secret",
+        "run_static_review.py",
+        "sandbox:run_static_review",
+        "skill-rule:hardcoded_secret",
+        "skill:run_static_review"
       ],
       "title": "pem_private_key secret added to source"
     },
@@ -279,6 +322,7 @@
       "source": [
         "rule:security",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:subprocess_shell_true",
         "skill:run_static_review"
       ],
@@ -296,6 +340,7 @@
       "source": [
         "rule:security",
         "run_static_review.py",
+        "sandbox:run_static_review",
         "skill-rule:subprocess_shell_true",
         "skill:run_static_review"
       ],
@@ -337,6 +382,7 @@
       "message": "sandbox_failure fixture intentionally returns a non-zero smoke-test status.",
       "needs_human_review": true,
       "source": [
+        "sandbox:smoke_test",
         "skill:smoke_test",
         "smoke_test.py"
       ],
@@ -448,8 +494,11 @@
       "decision": "allow",
       "duration_ms": 0,
       "exit_code": 0,
+      "failure_reason": "",
+      "output_bytes": 8811,
+      "output_file_count": 1,
       "output_files": {
-        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"findings\": [\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 7,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.9,\n      \"evidence\": \"result = eval(request.args[\\\"expr\\\"])\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 8,\n      \"recommendation\": \"Avoid eval/exec; use explicit parsing or a safe dispatch table.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:eval_exec\"\n      ],\n      \"title\": \"dynamic code execution in changed code\"\n    },\n    {\n      \"category\": \"async_resource\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = aiohttp.ClientSession()\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use async with aiohttp.ClientSession(...) or close the session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:aiohttp_session_lifecycle\"\n      ],\n      \"title\": \"aiohttp ClientSession may not be closed\"\n    },\n    {\n      \"category\": \"resource\",\n      \"confidence\": 0.8,\n      \"evidence\": \"f = open(path, \\\"w\\\")\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 8,\n      \"recommendation\": \"Use with open(...) as f or close the file in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:open_without_context\"\n      ],\n      \"title\": \"file handle may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"conn = sqlite3.connect(\\\"app.db\\\")\",\n      \"file\": \"app/repository.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"remote = engine.connect()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 6,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = Session()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 7,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 4,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 5,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    }\n  ],\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"needs_human_review\": [],\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
+        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"findings\": [\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 7,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.9,\n      \"evidence\": \"result = eval(request.args[\\\"expr\\\"])\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 8,\n      \"recommendation\": \"Avoid eval/exec; use explicit parsing or a safe dispatch table.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:eval_exec\"\n      ],\n      \"title\": \"dynamic code execution in changed code\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.9,\n      \"evidence\": \"cursor.execute(f\\\"SELECT * FROM users WHERE id = {request.args['user_id']}\\\")\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 9,\n      \"recommendation\": \"Use parameterized SQL placeholders and pass user values separately.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:sql_interpolation\"\n      ],\n      \"title\": \"SQL query uses string interpolation with user data\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.88,\n      \"evidence\": \"config = yaml.load(request.data)\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 10,\n      \"recommendation\": \"Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:yaml_load\"\n      ],\n      \"title\": \"yaml.load used without SafeLoader\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.88,\n      \"evidence\": \"profile = pickle.loads(request.body)\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 11,\n      \"recommendation\": \"Do not unpickle untrusted input; use a safe serialization format such as JSON.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:pickle_loads\"\n      ],\n      \"title\": \"pickle.loads called on request-controlled data\"\n    },\n    {\n      \"category\": \"async_resource\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = aiohttp.ClientSession()\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use async with aiohttp.ClientSession(...) or close the session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:aiohttp_session_lifecycle\"\n      ],\n      \"title\": \"aiohttp ClientSession may not be closed\"\n    },\n    {\n      \"category\": \"resource\",\n      \"confidence\": 0.8,\n      \"evidence\": \"f = open(path, \\\"w\\\")\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 8,\n      \"recommendation\": \"Use with open(...) as f or close the file in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:open_without_context\"\n      ],\n      \"title\": \"file handle may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"conn = sqlite3.connect(\\\"app.db\\\")\",\n      \"file\": \"app/repository.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"remote = engine.connect()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 6,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = Session()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 7,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 4,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 5,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"AWS_ACCESS_KEY_ID = \\\"[REDACTED:SECRET:aws_access_key:1a5d44a2]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 2,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"GITHUB_TOKEN = \\\"[REDACTED:SECRET:github_token:d73541f5]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 3,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"OPENAI_API_KEY = \\\"[REDACTED:SECRET:openai_key:2dfacb42]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 4,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"JWT_SAMPLE = \\\"[REDACTED:SECRET:jwt:3908a066]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 5,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"password = \\\"[REDACTED:SECRET:generic_assignment:87cbebfe]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 6,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    },\n    {\n      \"category\": \"secret\",\n      \"confidence\": 0.96,\n      \"evidence\": \"private_key = \\\"[REDACTED:SECRET:pem_private_key:4b420350]\\\"\",\n      \"file\": \"config/settings.py\",\n      \"line\": 7,\n      \"recommendation\": \"Remove the secret from source, rotate it, and load it from a managed secret store.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:hardcoded_secret\"\n      ],\n      \"title\": \"secret material added to source\"\n    }\n  ],\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"needs_human_review\": [],\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
       "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_1",
@@ -475,8 +524,11 @@
       "decision": "allow",
       "duration_ms": 0,
       "exit_code": 0,
+      "failure_reason": "",
+      "output_bytes": 319,
+      "output_file_count": 1,
       "output_files": {
-        "out/secrets.json": "{\n  \"by_type\": {\n    \"aws_access_key\": 1,\n    \"generic_assignment\": 1,\n    \"github_token\": 1,\n    \"jwt\": 1,\n    \"openai_key\": 1,\n    \"pem_private_key\": 1\n  },\n  \"findings\": [],\n  \"needs_human_review\": [],\n  \"redacted_secret_placeholders\": 6,\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
+        "out/secrets.json": "{\n  \"by_type\": {\n    \"aws_access_key\": 1,\n    \"generic_assignment\": 1,\n    \"github_token\": 1,\n    \"jwt\": 1,\n    \"openai_key\": 1,\n    \"pem_private_key\": 1\n  },\n  \"findings\": [],\n  \"needs_human_review\": [],\n  \"redacted_secret_placeholders\": 6,\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
       "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_2",
@@ -502,6 +554,9 @@
       "decision": "allow",
       "duration_ms": 0,
       "exit_code": 2,
+      "failure_reason": "sandbox command failed or timed out",
+      "output_bytes": 504,
+      "output_file_count": 1,
       "output_files": {
         "out/smoke.json": "{\n  \"findings\": [],\n  \"message\": \"intentional fixture smoke failure\",\n  \"needs_human_review\": [\n    {\n      \"category\": \"sandbox\",\n      \"confidence\": 1.0,\n      \"message\": \"sandbox_failure fixture intentionally returns a non-zero smoke-test status.\",\n      \"needs_human_review\": true,\n      \"source\": [\n        \"smoke_test.py\"\n      ],\n      \"title\": \"sandbox smoke test failed\"\n    }\n  ],\n  \"secret_token_in_env\": false,\n  \"status\": \"failed\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },

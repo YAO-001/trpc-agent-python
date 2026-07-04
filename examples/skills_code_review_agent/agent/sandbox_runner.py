@@ -35,6 +35,11 @@ DEFAULT_OUTPUTS = {
     "scripts/secret_scan.py": ["out/secrets.json"],
     "scripts/smoke_test.py": ["out/smoke.json"],
 }
+DEFAULT_TIMEOUTS = {
+    "scripts/run_static_review.py": 30,
+    "scripts/secret_scan.py": 30,
+    "scripts/smoke_test.py": 30,
+}
 MAX_STDOUT_CHARS = 12000
 MAX_STDERR_CHARS = 12000
 MAX_OUTPUT_FILE_BYTES = 256 * 1024
@@ -42,6 +47,11 @@ MAX_OUTPUT_FILES = 16
 SAFE_ENV_KEYS = {
     "PATH",
     "Path",
+    "PYTHONPATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
     "PATHEXT",
     "SYSTEMROOT",
     "SystemRoot",
@@ -71,6 +81,12 @@ def _output_files_for_command(command: list[str]) -> list[str]:
     if len(command) > 1:
         return DEFAULT_OUTPUTS.get(command[1], ["out/*.json"])
     return []
+
+
+def _timeout_for_command(command: list[str]) -> int:
+    if len(command) > 1:
+        return DEFAULT_TIMEOUTS.get(command[1], 30)
+    return 30
 
 
 def _safe_env() -> dict[str, str]:
@@ -147,6 +163,8 @@ def _run_has_human_review_artifact(run: SandboxRun) -> bool:
         if not isinstance(data, dict):
             continue
         value = data.get("needs_human_review")
+        if value is True:
+            return True
         if isinstance(value, dict):
             return True
         if isinstance(value, list) and any(isinstance(item, dict) for item in value):
@@ -238,7 +256,7 @@ class LocalSkillHarness:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_timeout_for_command(logical_command),
                 env=_safe_env(),
             )
             timed_out = False
@@ -447,7 +465,7 @@ class SandboxRunner:
                 command=command,
                 runtime=effective_runtime,
                 output_files=output_files,
-                timeout=30,
+                timeout=_timeout_for_command(command),
             )
             intercept = decision.intercept.model_copy(update={"task_id": task_id})
             if decision.decision in {"deny", "needs_human_review"}:
@@ -499,7 +517,7 @@ class SandboxRunner:
                     )
                 )
 
-        artifacts = load_sandbox_artifacts(runs)
+        artifacts = load_sandbox_artifacts(runs, redactor=self.redactor)
         for run in runs:
             if (run.exit_code != 0 or run.timed_out) and not _run_has_human_review_artifact(run):
                 needs_human_review.append(_failure_warning(run))

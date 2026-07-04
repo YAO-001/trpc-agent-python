@@ -29,6 +29,7 @@ def main() -> int:
             by_type[secret_type] = by_type.get(secret_type, 0) + 1
     output = {
         "task_id": payload.get("task_id", ""),
+        "status": "ok",
         "redacted_secret_placeholders": sum(by_type.values()),
         "by_type": dict(sorted(by_type.items())),
         "findings": [],

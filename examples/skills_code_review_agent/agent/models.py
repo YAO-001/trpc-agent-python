@@ -147,8 +147,19 @@ class SandboxRun(BaseModel):
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     output_truncated: bool = False
+    output_file_count: int = 0
+    output_bytes: int = 0
+    failure_reason: str = ""
     warning: str = ""
     created_at: str = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _set_output_summary(self) -> "SandboxRun":
+        self.output_file_count = len(self.output_files)
+        self.output_bytes = sum(len(content.encode("utf-8")) for content in self.output_files.values())
+        if not self.failure_reason and (self.exit_code != 0 or self.timed_out):
+            self.failure_reason = self.warning or self.stderr or self.stdout or "sandbox command failed or timed out"
+        return self
 
 
 class TelemetrySummary(BaseModel):

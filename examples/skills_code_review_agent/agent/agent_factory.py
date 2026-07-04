@@ -38,45 +38,50 @@ def create_skill_tool_set(runtime: str = "container"):
     )
 
 
-def _input_specs(input_path: str | None) -> list[dict[str, str]]:
+def _input_specs(input_path: str | None, *, workspace_path: str) -> list[dict[str, str]]:
     if not input_path:
         return []
     return [
         {
             "src": f"host://{Path(input_path).resolve().as_posix()}",
-            "dst": "skills/code-review/work/inputs/review_input.json",
+            "dst": f"{workspace_path}/work/inputs/review_input.json",
             "mode": "copy",
         }
     ]
 
 
-def build_skill_run_calls(input_path: str | None = None) -> list[dict[str, Any]]:
-    inputs = _input_specs(input_path)
+def build_skill_run_calls(
+    input_path: str | None = None,
+    *,
+    workspace_path: str = "skills/code-review",
+) -> list[dict[str, Any]]:
+    inputs = _input_specs(input_path, workspace_path=workspace_path)
+    cwd = "$SKILLS_DIR/code-review"
     return [
         {
             "skill": "code-review",
-            "cwd": "$SKILLS_DIR/code-review",
+            "cwd": cwd,
             "command": (
                 "python3 scripts/run_static_review.py --input work/inputs/review_input.json "
                 "--output out/findings.json"
             ),
-            "output_files": ["skills/code-review/out/findings.json"],
+            "output_files": [f"{workspace_path}/out/findings.json"],
             "inputs": inputs,
             "timeout": 30,
         },
         {
             "skill": "code-review",
-            "cwd": "$SKILLS_DIR/code-review",
+            "cwd": cwd,
             "command": "python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json",
-            "output_files": ["skills/code-review/out/secrets.json"],
+            "output_files": [f"{workspace_path}/out/secrets.json"],
             "inputs": inputs,
             "timeout": 30,
         },
         {
             "skill": "code-review",
-            "cwd": "$SKILLS_DIR/code-review",
+            "cwd": cwd,
             "command": "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json",
-            "output_files": ["skills/code-review/out/smoke.json"],
+            "output_files": [f"{workspace_path}/out/smoke.json"],
             "inputs": inputs,
             "timeout": 30,
         },
@@ -96,6 +101,7 @@ def review_before_tool_callback(context, tool, args: dict, response=None):  # py
         output_files=output_files,
         env=env,
         timeout=timeout,
+        network_access=bool(args.get("network_access")),
     )
     if decision.decision == "allow":
         return None

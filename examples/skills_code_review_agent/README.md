@@ -60,6 +60,20 @@ all collected sandbox content before persistence.
 falls back to local only with a persisted Filter intercept, human-review warning,
 and telemetry record.
 
+## Acceptance Matrix
+
+| Requirement | Implementation |
+| --- | --- |
+| 8 fixtures | `fixtures/*.diff` plus `eval-fixtures` writes `outputs/eval_summary.json` |
+| Default sandbox runtime | CLI defaults to `--runtime container`; `auto` prefers container |
+| Local fallback behavior | `LocalSkillHarness` is only selected by `--runtime local` or recorded `auto` fallback |
+| DB tables | `schema.sql` and `agent/storage.py` persist tasks, inputs, sandbox runs, findings, filter intercepts, telemetry, and reports |
+| Filter-before-execution | `ReviewExecutionPolicy` gates every sandbox command before local/container harness execution |
+| Timeout/output cap | sandbox stdout/stderr/output files are capped and record truncation plus output byte/file counts |
+| Secret redaction | diffs, sandbox streams, output artifacts, reports, and DB records are redacted before persistence |
+| Fake model/dry-run | no model API is required; dry-run uses deterministic timestamps and fixture task ids |
+| Report fields | JSON/Markdown include schema version, findings, warnings, filter intercepts, sandbox summary, telemetry, redaction summary, recommendations, and query command |
+
 ## Fixture Matrix
 
 | Fixture | Purpose |
