@@ -18,17 +18,17 @@
       "redactions": 0,
       "sandbox_failures": 0,
       "task_id": "review_fe7d3500a1f9397c",
-      "warnings": 1
+      "warnings": 2
     },
     {
       "conclusion": "Review found deterministic issues to address.",
-      "findings": 2,
+      "findings": 4,
       "fixture": "async_resource_leak",
       "needs_human_review": 1,
       "redactions": 0,
       "sandbox_failures": 0,
       "task_id": "review_f5711bfa05387f74",
-      "warnings": 2
+      "warnings": 3
     },
     {
       "conclusion": "Review found deterministic issues to address.",
@@ -38,7 +38,7 @@
       "redactions": 0,
       "sandbox_failures": 0,
       "task_id": "review_fa79ea1c73bb2c6a",
-      "warnings": 1
+      "warnings": 2
     },
     {
       "conclusion": "No deterministic findings.",
@@ -48,7 +48,7 @@
       "redactions": 0,
       "sandbox_failures": 0,
       "task_id": "review_b4686c1e200ff9bf",
-      "warnings": 1
+      "warnings": 2
     },
     {
       "conclusion": "High-confidence issues require changes before merge.",
@@ -68,7 +68,7 @@
       "redactions": 0,
       "sandbox_failures": 1,
       "task_id": "review_88e837641507676a",
-      "warnings": 1
+      "warnings": 2
     },
     {
       "conclusion": "High-confidence issues require changes before merge.",
@@ -81,7 +81,7 @@
       "warnings": 1
     }
   ],
-  "total_findings": 18,
+  "total_findings": 20,
   "total_fixtures": 8,
   "total_needs_human_review": 4
 }

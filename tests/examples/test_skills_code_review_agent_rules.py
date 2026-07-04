@@ -70,6 +70,24 @@ def test_secret_fixture_redacts_before_findings():
         assert raw not in redacted.text
 
 
+def test_dummy_secret_not_high_confidence_finding():
+    diff = """diff --git a/app/config.py b/app/config.py
+index 1111111..2222222 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,2 +1,4 @@
++token = "example-token"
++password = "changeme"
+"""
+    redacted = SecretRedactor().redact_text(diff)
+    result = RuleEngine().run(parse_unified_diff(redacted.text))
+
+    assert not any(
+        finding.category == "secret" and finding.severity == "high"
+        for finding in result.findings
+    )
+
+
 def test_deduplicate_same_file_line_category_keeps_highest_and_merges_sources():
     low = Finding(
         severity="low",

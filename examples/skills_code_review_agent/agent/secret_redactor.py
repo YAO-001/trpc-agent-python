@@ -55,6 +55,11 @@ class SecretRedactor:
     def placeholder(cls, secret_type: str, value: str) -> str:
         return f"[REDACTED:SECRET:{secret_type}:{cls.digest(value)[:8]}]"
 
+    @staticmethod
+    def _is_dummy_assignment_value(value: str) -> bool:
+        normalized = value.strip().strip("\"'").lower()
+        return normalized in {"changeme", "change-me", "example-token", "dummy-token", "placeholder"}
+
     def redact_text(self, text: str) -> RedactionResult:
         events: dict[tuple[str, str], RedactionEvent] = {}
         redacted = text
@@ -82,6 +87,11 @@ class SecretRedactor:
             value = match.group(secret_pattern.value_group) if secret_pattern.value_group else match.group(0)
             prefix = text[max(0, match.start() - 24):match.start()]
             if "REDACTED:" in prefix or value.startswith("[REDACTED:SECRET:") or "REDACTED:SECRET" in value:
+                return match.group(0)
+            if (
+                secret_pattern.secret_type == "generic_assignment"
+                and self._is_dummy_assignment_value(value)
+            ):
                 return match.group(0)
             digest = self.digest(value)
             placeholder = self.placeholder(secret_pattern.secret_type, value)

@@ -13,9 +13,28 @@
       "recommendation": "Use async with aiohttp.ClientSession(...) or close the session in a finally block.",
       "severity": "medium",
       "source": [
-        "rule:async_resource"
+        "rule:async_resource",
+        "run_static_review.py",
+        "skill-rule:aiohttp_session_lifecycle",
+        "skill:run_static_review"
       ],
       "title": "aiohttp ClientSession is not closed"
+    },
+    {
+      "category": "database",
+      "confidence": 0.82,
+      "dedupe_key": "d5ce57617a4c0f2a1beaf5e388d3e9e1c89e1e2f5f588cb1e8ff40d14c4527f8",
+      "evidence": "session = aiohttp.ClientSession()",
+      "file": "app/async_worker.py",
+      "line": 5,
+      "recommendation": "Use a context manager or close the connection/session in a finally block.",
+      "severity": "medium",
+      "source": [
+        "run_static_review.py",
+        "skill-rule:database_lifecycle",
+        "skill:run_static_review"
+      ],
+      "title": "database connection/session may not be closed"
     },
     {
       "category": "async_resource",
@@ -32,6 +51,22 @@
       "title": "file handle opened without a context manager"
     },
     {
+      "category": "resource",
+      "confidence": 0.8,
+      "dedupe_key": "a46a13cfd2f84c83f08e5f9fd9ca0f68b845d6ffbf18aa93c71c32ff50cea460",
+      "evidence": "f = open(path, \"w\")",
+      "file": "app/async_worker.py",
+      "line": 8,
+      "recommendation": "Use with open(...) as f or close the file in a finally block.",
+      "severity": "medium",
+      "source": [
+        "run_static_review.py",
+        "skill-rule:open_without_context",
+        "skill:run_static_review"
+      ],
+      "title": "file handle may not be closed"
+    },
+    {
       "category": "security",
       "confidence": 0.96,
       "dedupe_key": "4a894f070d56d087b2e87e34682786a59b114e72f297eab32b7b2d130bb8cea4",
@@ -41,7 +76,10 @@
       "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "skill-rule:subprocess_shell_true",
+        "skill:run_static_review"
       ],
       "title": "subprocess invoked with shell=True"
     },
@@ -55,7 +93,10 @@
       "recommendation": "Replace eval/exec with a parser or an allowlisted command table.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "skill-rule:eval_exec",
+        "skill:run_static_review"
       ],
       "title": "dynamic code execution on request-controlled data"
     },
@@ -111,7 +152,10 @@
       "recommendation": "Use a context manager or close the connection/session in a finally block.",
       "severity": "medium",
       "source": [
-        "rule:database"
+        "rule:database",
+        "run_static_review.py",
+        "skill-rule:database_lifecycle",
+        "skill:run_static_review"
       ],
       "title": "database connection/session is not closed"
     },
@@ -125,7 +169,10 @@
       "recommendation": "Use a context manager or close the connection/session in a finally block.",
       "severity": "medium",
       "source": [
-        "rule:database"
+        "rule:database",
+        "run_static_review.py",
+        "skill-rule:database_lifecycle",
+        "skill:run_static_review"
       ],
       "title": "database connection/session is not closed"
     },
@@ -139,7 +186,10 @@
       "recommendation": "Use a context manager or close the connection/session in a finally block.",
       "severity": "medium",
       "source": [
-        "rule:database"
+        "rule:database",
+        "run_static_review.py",
+        "skill-rule:database_lifecycle",
+        "skill:run_static_review"
       ],
       "title": "database connection/session is not closed"
     },
@@ -243,7 +293,10 @@
       "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "skill-rule:subprocess_shell_true",
+        "skill:run_static_review"
       ],
       "title": "subprocess invoked with shell=True"
     },
@@ -257,7 +310,10 @@
       "recommendation": "Pass an argv list with shell=False and validate the executable explicitly.",
       "severity": "high",
       "source": [
-        "rule:security"
+        "rule:security",
+        "run_static_review.py",
+        "skill-rule:subprocess_shell_true",
+        "skill:run_static_review"
       ],
       "title": "subprocess invoked with shell=True"
     }
@@ -341,17 +397,17 @@
   ],
   "recommendations": [
     "Use async with aiohttp.ClientSession(...) or close the session in a finally block.",
+    "Use a context manager or close the connection/session in a finally block.",
     "Use with open(...) as f so the descriptor is closed on every path.",
+    "Use with open(...) as f or close the file in a finally block.",
     "Pass an argv list with shell=False and validate the executable explicitly.",
     "Replace eval/exec with a parser or an allowlisted command table.",
     "Use parameterized SQL placeholders and pass user values separately.",
     "Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.",
     "Do not unpickle untrusted input; use a safe serialization format such as JSON.",
-    "Use a context manager or close the connection/session in a finally block.",
     "Remove the secret from source, rotate it, and load it from a managed secret store.",
     "asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.",
-    "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out",
-    "sandbox_failure fixture intentionally returns a non-zero smoke-test status."
+    "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out"
   ],
   "redaction_summary": {
     "by_type": {
@@ -421,7 +477,7 @@
       "duration_ms": 0,
       "exit_code": 0,
       "output_files": {
-        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"findings\": [],\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"needs_human_review\": [],\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
+        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"findings\": [\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 7,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.9,\n      \"evidence\": \"result = eval(request.args[\\\"expr\\\"])\",\n      \"file\": \"app/handlers.py\",\n      \"line\": 8,\n      \"recommendation\": \"Avoid eval/exec; use explicit parsing or a safe dispatch table.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:eval_exec\"\n      ],\n      \"title\": \"dynamic code execution in changed code\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = aiohttp.ClientSession()\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"async_resource\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = aiohttp.ClientSession()\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use async with aiohttp.ClientSession(...) or close the session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:aiohttp_session_lifecycle\"\n      ],\n      \"title\": \"aiohttp ClientSession may not be closed\"\n    },\n    {\n      \"category\": \"resource\",\n      \"confidence\": 0.8,\n      \"evidence\": \"f = open(path, \\\"w\\\")\",\n      \"file\": \"app/async_worker.py\",\n      \"line\": 8,\n      \"recommendation\": \"Use with open(...) as f or close the file in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:open_without_context\"\n      ],\n      \"title\": \"file handle may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"conn = sqlite3.connect(\\\"app.db\\\")\",\n      \"file\": \"app/repository.py\",\n      \"line\": 5,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"remote = engine.connect()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 6,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"database\",\n      \"confidence\": 0.82,\n      \"evidence\": \"session = Session()\",\n      \"file\": \"app/repository.py\",\n      \"line\": 7,\n      \"recommendation\": \"Use a context manager or close the connection/session in a finally block.\",\n      \"severity\": \"medium\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:database_lifecycle\"\n      ],\n      \"title\": \"database connection/session may not be closed\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 4,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    },\n    {\n      \"category\": \"security\",\n      \"confidence\": 0.92,\n      \"evidence\": \"subprocess.run(request.args[\\\"cmd\\\"], shell=True)\",\n      \"file\": \"tools/runner.py\",\n      \"line\": 5,\n      \"recommendation\": \"Pass an argv list with shell=False and validate the executable explicitly.\",\n      \"severity\": \"high\",\n      \"source\": [\n        \"run_static_review.py\",\n        \"skill-rule:subprocess_shell_true\"\n      ],\n      \"title\": \"subprocess invoked with shell=True\"\n    }\n  ],\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"needs_human_review\": [],\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
       "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_1",
@@ -492,7 +548,7 @@
   "schema_version": "1.0",
   "severity_distribution": {
     "high": 13,
-    "medium": 5
+    "medium": 7
   },
   "task_id": "review_21a71a142ea4d1b0",
   "telemetry": {
@@ -502,7 +558,7 @@
     "files_changed": 9,
     "filter_denied_count": 0,
     "filter_needs_review_count": 0,
-    "findings_count": 18,
+    "findings_count": 20,
     "lines_added": 43,
     "needs_human_review_count": 4,
     "output_truncated_count": 0,

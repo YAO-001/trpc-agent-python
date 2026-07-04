@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +33,30 @@ RAW_SAMPLE_SECRETS = [
     "correct-horse-battery-staple",
     "FAKEKEYDATA",
 ]
+
+
+def _run_static_review_script(tmp_path, payload):
+    input_path = tmp_path / "review_input.json"
+    output_path = tmp_path / "findings.json"
+    input_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(EXAMPLE_DIR / "skills" / "code-review" / "scripts" / "run_static_review.py"),
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    return json.loads(output_path.read_text(encoding="utf-8"))
 
 
 def test_filter_deny_before_sandbox_execution():
@@ -72,6 +97,72 @@ def test_skill_run_filter_denies_secret_env():
     assert result["blocked"] is True
     assert result["decision"] == "deny"
     assert "SECRET_TOKEN" in result["reason"]
+
+
+def test_skill_static_review_emits_real_security_finding(tmp_path):
+    report = ReviewOrchestrator(db_url=f"sqlite:///{tmp_path / 'review.db'}", output_dir=tmp_path / "out").review(
+        fixture="security",
+        dry_run=True,
+        runtime="local",
+    )
+
+    skill_findings = [
+        finding for finding in report.findings if "skill:run_static_review" in finding.source
+    ]
+
+    assert skill_findings
+    assert any(
+        title in {finding.title for finding in skill_findings}
+        for title in {
+            "subprocess invoked with shell=True",
+            "dynamic code execution in changed code",
+        }
+    )
+
+
+def test_skill_static_review_emits_database_or_resource_finding(tmp_path):
+    report = ReviewOrchestrator(db_url=f"sqlite:///{tmp_path / 'review.db'}", output_dir=tmp_path / "out").review(
+        fixture="async_resource_leak",
+        dry_run=True,
+        runtime="local",
+    )
+
+    skill_findings = [
+        finding for finding in report.findings if "skill:run_static_review" in finding.source
+    ]
+
+    assert skill_findings
+    assert any(finding.category in {"database", "resource", "async_resource"} for finding in skill_findings)
+
+
+def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
+    output = _run_static_review_script(
+        tmp_path,
+        {
+            "task_id": "safe-patterns",
+            "fixture_names": [],
+            "changed_files": ["app/safe.py"],
+            "added_lines": [
+                {
+                    "file": "app/safe.py",
+                    "line": 10,
+                    "content": 'subprocess.run(["ls", "-la"], shell=False)',
+                },
+                {"file": "app/safe.py", "line": 11, "content": "with open(path) as f:"},
+                {"file": "app/safe.py", "line": 12, "content": "    data = f.read()"},
+                {"file": "app/safe.py", "line": 13, "content": "conn = sqlite3.connect(path)"},
+                {"file": "app/safe.py", "line": 14, "content": "try:"},
+                {"file": "app/safe.py", "line": 15, "content": "    pass"},
+                {"file": "app/safe.py", "line": 16, "content": "finally:"},
+                {"file": "app/safe.py", "line": 17, "content": "    conn.close()"},
+            ],
+        },
+    )
+
+    finding_keys = {(item["category"], item["title"]) for item in output["findings"]}
+    assert ("security", "subprocess invoked with shell=True") not in finding_keys
+    assert ("resource", "file handle may not be closed") not in finding_keys
+    assert ("database", "database connection/session may not be closed") not in finding_keys
 
 
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):

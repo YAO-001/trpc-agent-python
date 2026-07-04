@@ -7,10 +7,10 @@
 
 ## Findings Summary
 
-- Findings: 18
+- Findings: 20
 - Warnings: 1
 - Needs human review: 4
-- Severity distribution: `{"high": 13, "medium": 5}`
+- Severity distribution: `{"high": 13, "medium": 7}`
 
 ## Findings
 
@@ -19,8 +19,16 @@
 - Location: `app/async_worker.py:5`
 - Evidence: `session = aiohttp.ClientSession()`
 - Confidence: 0.86
-- Source: `rule:async_resource`
+- Source: `rule:async_resource, run_static_review.py, skill-rule:aiohttp_session_lifecycle, skill:run_static_review`
 - Recommendation: Use async with aiohttp.ClientSession(...) or close the session in a finally block.
+
+### MEDIUM database: database connection/session may not be closed
+
+- Location: `app/async_worker.py:5`
+- Evidence: `session = aiohttp.ClientSession()`
+- Confidence: 0.82
+- Source: `run_static_review.py, skill-rule:database_lifecycle, skill:run_static_review`
+- Recommendation: Use a context manager or close the connection/session in a finally block.
 
 ### MEDIUM async_resource: file handle opened without a context manager
 
@@ -30,12 +38,20 @@
 - Source: `rule:async_resource`
 - Recommendation: Use with open(...) as f so the descriptor is closed on every path.
 
+### MEDIUM resource: file handle may not be closed
+
+- Location: `app/async_worker.py:8`
+- Evidence: `f = open(path, "w")`
+- Confidence: 0.80
+- Source: `run_static_review.py, skill-rule:open_without_context, skill:run_static_review`
+- Recommendation: Use with open(...) as f or close the file in a finally block.
+
 ### HIGH security: subprocess invoked with shell=True
 
 - Location: `app/handlers.py:7`
 - Evidence: `subprocess.run(request.args["cmd"], shell=True)`
 - Confidence: 0.96
-- Source: `rule:security`
+- Source: `rule:security, run_static_review.py, skill-rule:subprocess_shell_true, skill:run_static_review`
 - Recommendation: Pass an argv list with shell=False and validate the executable explicitly.
 
 ### HIGH security: dynamic code execution on request-controlled data
@@ -43,7 +59,7 @@
 - Location: `app/handlers.py:8`
 - Evidence: `result = eval(request.args["expr"])`
 - Confidence: 0.92
-- Source: `rule:security`
+- Source: `rule:security, run_static_review.py, skill-rule:eval_exec, skill:run_static_review`
 - Recommendation: Replace eval/exec with a parser or an allowlisted command table.
 
 ### HIGH security: SQL query uses string interpolation with user data
@@ -75,7 +91,7 @@
 - Location: `app/repository.py:5`
 - Evidence: `conn = sqlite3.connect("app.db")`
 - Confidence: 0.86
-- Source: `rule:database`
+- Source: `rule:database, run_static_review.py, skill-rule:database_lifecycle, skill:run_static_review`
 - Recommendation: Use a context manager or close the connection/session in a finally block.
 
 ### MEDIUM database: database connection/session is not closed
@@ -83,7 +99,7 @@
 - Location: `app/repository.py:6`
 - Evidence: `remote = engine.connect()`
 - Confidence: 0.86
-- Source: `rule:database`
+- Source: `rule:database, run_static_review.py, skill-rule:database_lifecycle, skill:run_static_review`
 - Recommendation: Use a context manager or close the connection/session in a finally block.
 
 ### MEDIUM database: database connection/session is not closed
@@ -91,7 +107,7 @@
 - Location: `app/repository.py:7`
 - Evidence: `session = Session()`
 - Confidence: 0.86
-- Source: `rule:database`
+- Source: `rule:database, run_static_review.py, skill-rule:database_lifecycle, skill:run_static_review`
 - Recommendation: Use a context manager or close the connection/session in a finally block.
 
 ### HIGH secret: aws_access_key secret added to source
@@ -147,7 +163,7 @@
 - Location: `tools/runner.py:4`
 - Evidence: `subprocess.run(request.args["cmd"], shell=True)`
 - Confidence: 0.96
-- Source: `rule:security`
+- Source: `rule:security, run_static_review.py, skill-rule:subprocess_shell_true, skill:run_static_review`
 - Recommendation: Pass an argv list with shell=False and validate the executable explicitly.
 
 ### HIGH security: subprocess invoked with shell=True
@@ -155,7 +171,7 @@
 - Location: `tools/runner.py:5`
 - Evidence: `subprocess.run(request.args["cmd"], shell=True)`
 - Confidence: 0.96
-- Source: `rule:security`
+- Source: `rule:security, run_static_review.py, skill-rule:subprocess_shell_true, skill:run_static_review`
 - Recommendation: Pass an argv list with shell=False and validate the executable explicitly.
 
 ## Warnings And Human Review
@@ -197,14 +213,14 @@
 ## Executable Recommendations
 
 - Use async with aiohttp.ClientSession(...) or close the session in a finally block.
+- Use a context manager or close the connection/session in a finally block.
 - Use with open(...) as f so the descriptor is closed on every path.
+- Use with open(...) as f or close the file in a finally block.
 - Pass an argv list with shell=False and validate the executable explicitly.
 - Replace eval/exec with a parser or an allowlisted command table.
 - Use parameterized SQL placeholders and pass user values separately.
 - Use yaml.safe_load or pass Loader=yaml.SafeLoader for untrusted YAML.
 - Do not unpickle untrusted input; use a safe serialization format such as JSON.
-- Use a context manager or close the connection/session in a finally block.
 - Remove the secret from source, rotate it, and load it from a managed secret store.
 - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
 - python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out
-- sandbox_failure fixture intentionally returns a non-zero smoke-test status.
