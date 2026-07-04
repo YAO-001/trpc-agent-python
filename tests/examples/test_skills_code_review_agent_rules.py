@@ -7,12 +7,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from agent.dedupe import dedupe_findings
+from agent.dedupe import dedupe_warnings
 from agent.diff_parser import parse_unified_diff
 from agent.input_resolver import EXAMPLE_DIR
 from agent.models import Finding
+from agent.models import ReviewWarning
 from agent.rule_engine import RuleEngine
 from agent.secret_redactor import SecretRedactor
 
@@ -106,3 +106,29 @@ def test_low_confidence_missing_tests_routes_to_warning():
 
     assert not result.findings
     assert any(warning.category == "test" and not warning.needs_human_review for warning in result.warnings)
+
+
+def test_deduplicate_sandbox_failure_warnings_merges_sources():
+    first = ReviewWarning(
+        category="sandbox",
+        title="sandbox smoke test failed",
+        message="sandbox_failure fixture intentionally returns a non-zero smoke-test status.",
+        confidence=0.8,
+        source=["skill:smoke_test"],
+        needs_human_review=True,
+    )
+    duplicate = ReviewWarning(
+        category="sandbox",
+        title="sandbox smoke test failed",
+        message="sandbox_failure fixture intentionally returns a non-zero smoke-test status.",
+        confidence=1.0,
+        source=["sandbox_runner"],
+        needs_human_review=True,
+    )
+
+    deduped = dedupe_warnings([first, duplicate])
+
+    assert len(deduped) == 1
+    assert deduped[0].confidence == 1.0
+    assert deduped[0].source == ["sandbox_runner", "skill:smoke_test"]
+    assert deduped[0].needs_human_review is True

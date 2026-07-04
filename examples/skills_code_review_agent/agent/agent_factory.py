@@ -22,6 +22,8 @@ def create_skill_tool_set(runtime: str = "container"):
     from trpc_agent_sdk.skills import FsSkillRepository
     from trpc_agent_sdk.skills import SkillToolSet
 
+    if runtime not in {"container", "local"}:
+        raise ValueError(f"unsupported SkillToolSet runtime {runtime!r}")
     if runtime == "local":
         workspace_runtime = create_local_workspace_runtime(read_only_staged_skill=True)
     else:
@@ -81,11 +83,13 @@ def review_before_tool_callback(context, tool, args: dict, response=None):  # py
         return None
     command = str(args.get("command", "")).split()
     output_files = list(args.get("output_files") or [])
+    env = dict(args.get("env") or {})
     timeout = int(args.get("timeout") or 30)
     decision = ReviewExecutionPolicy(max_timeout_sec=60).evaluate(
         command=command,
         runtime="container",
         output_files=output_files,
+        env=env,
         timeout=timeout,
     )
     if decision.decision == "allow":

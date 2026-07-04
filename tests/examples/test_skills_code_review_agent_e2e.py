@@ -8,16 +8,20 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from agent import sandbox_runner as sandbox_module
+from agent.agent_factory import review_before_tool_callback
 from agent.filter_policy import ReviewExecutionPolicy
 from agent.input_resolver import EXAMPLE_DIR
+from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
 from agent.sandbox_runner import HarnessExecutionResult
 from agent.sandbox_runner import SandboxRunner
 from agent.secret_redactor import SecretRedactor
-from agent.models import SandboxRun
 from agent.storage import ReviewStorage
 
 
@@ -48,6 +52,23 @@ def test_filter_deny_before_sandbox_execution():
     assert result.runs == []
     assert len(result.intercepts) == 1
     assert result.intercepts[0].decision == "deny"
+
+
+def test_skill_run_filter_denies_secret_env():
+    result = review_before_tool_callback(
+        None,
+        SimpleNamespace(name="skill_run"),
+        {
+            "command": "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json",
+            "output_files": ["out/findings.json"],
+            "env": {"SECRET_TOKEN": "x"},
+            "timeout": 30,
+        },
+    )
+
+    assert result["blocked"] is True
+    assert result["decision"] == "deny"
+    assert "SECRET_TOKEN" in result["reason"]
 
 
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):
@@ -98,7 +119,7 @@ def test_eval_fixtures_writes_summary(tmp_path):
     assert summary["total_fixtures"] == 8
 
 
-def test_skill_only_finding_is_persisted_to_report_and_db(tmp_path):
+def test_sandbox_failure_keeps_static_review_stable_without_test_marker(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'review.db'}"
     output_dir = tmp_path / "out"
     report = ReviewOrchestrator(db_url=db_url, output_dir=output_dir).review(
@@ -107,16 +128,14 @@ def test_skill_only_finding_is_persisted_to_report_and_db(tmp_path):
         runtime="local",
     )
 
-    assert any(
-        finding.title == "skill-only static review marker" and "skill:run_static_review" in finding.source
-        for finding in report.findings
-    )
+    assert not report.findings
     json_text = (output_dir / "review_report.json").read_text(encoding="utf-8")
-    assert "skill-only static review marker" in json_text
+    assert "skill-only static review marker" not in json_text
     rows = ReviewStorage(db_url).query_task(report.task_id)
-    assert any(row["title"] == "skill-only static review marker" for row in rows["findings"])
+    assert rows["findings"] == []
     static_run = next(run for run in report.sandbox_runs if "run_static_review.py" in " ".join(run.command))
     assert static_run.exit_code == 0
+    assert any(warning.title == "sandbox smoke test failed" for warning in report.needs_human_review)
 
 
 def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatch):
@@ -172,6 +191,27 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
         finding.title == "container skill finding" and "skill:run_static_review" in finding.source
         for finding in report.findings
     )
+
+
+def test_container_runtime_real_skill_run_if_docker_available(tmp_path):
+    try:
+        result = subprocess.run(["docker", "info"], check=False, capture_output=True, text=True, timeout=20)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pytest.skip("Docker is not available for optional container SkillToolSet integration.")
+    if result.returncode != 0:
+        pytest.skip("Docker is not running for optional container SkillToolSet integration.")
+
+    report = ReviewOrchestrator(db_url=f"sqlite:///{tmp_path / 'review.db'}", output_dir=tmp_path / "out").review(
+        fixture="security",
+        dry_run=True,
+        runtime="container",
+    )
+
+    assert report.sandbox_runs
+    assert all(run.runtime == "container" for run in report.sandbox_runs)
+    has_skill_source = any("skill:" in source for finding in report.findings for source in finding.source)
+    has_artifacts = any(run.output_files for run in report.sandbox_runs)
+    assert has_skill_source or has_artifacts
 
 
 def test_auto_runtime_prefers_container_then_records_local_fallback(tmp_path, monkeypatch):

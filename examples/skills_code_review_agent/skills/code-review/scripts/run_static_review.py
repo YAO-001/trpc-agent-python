@@ -29,20 +29,6 @@ def main() -> int:
         "warnings": [],
         "needs_human_review": [],
     }
-    if "sandbox_failure" in payload.get("fixture_names", []):
-        output["findings"].append(
-            {
-                "severity": "low",
-                "category": "sandbox",
-                "file": "src/sandbox_target.py",
-                "line": 2,
-                "title": "skill-only static review marker",
-                "evidence": "sandbox_failure fixture is reported only by the Skill script",
-                "recommendation": "Verify that sandbox artifact findings are merged into the final report.",
-                "confidence": 0.95,
-                "source": ["run_static_review.py"],
-            }
-        )
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(output, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")

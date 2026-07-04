@@ -409,7 +409,7 @@ class SandboxRunner:
         dry_run: bool,
         commands: list[list[str]] | None = None,
     ) -> SandboxResult:
-        if runtime not in {"local", "container", "auto", "cube"}:
+        if runtime not in {"local", "container", "auto"}:
             raise ValueError(f"unsupported runtime {runtime!r}")
         effective_runtime = "container" if runtime == "auto" else runtime
         logical_commands = commands or [list(command) for command in ALLOWED_SKILL_COMMANDS]

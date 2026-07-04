@@ -7,10 +7,10 @@
 
 ## Findings Summary
 
-- Findings: 19
+- Findings: 18
 - Warnings: 1
 - Needs human review: 4
-- Severity distribution: `{"high": 13, "low": 1, "medium": 5}`
+- Severity distribution: `{"high": 13, "medium": 5}`
 
 ## Findings
 
@@ -142,14 +142,6 @@
 - Source: `redactor:pem_private_key, rule:secret`
 - Recommendation: Remove the secret from source, rotate it, and load it from a managed secret store.
 
-### LOW sandbox: skill-only static review marker
-
-- Location: `src/sandbox_target.py:2`
-- Evidence: `sandbox_failure fixture is reported only by the Skill script`
-- Confidence: 0.95
-- Source: `run_static_review.py, skill:run_static_review`
-- Recommendation: Verify that sandbox artifact findings are merged into the final report.
-
 ### HIGH security: subprocess invoked with shell=True
 
 - Location: `tools/runner.py:4`
@@ -213,6 +205,6 @@
 - Do not unpickle untrusted input; use a safe serialization format such as JSON.
 - Use a context manager or close the connection/session in a finally block.
 - Remove the secret from source, rotate it, and load it from a managed secret store.
-- Verify that sandbox artifact findings are merged into the final report.
 - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
 - python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out
+- sandbox_failure fixture intentionally returns a non-zero smoke-test status.

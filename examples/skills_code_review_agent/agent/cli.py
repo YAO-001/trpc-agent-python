@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--fixture", choices=[*FIXTURE_ORDER, "all"])
     review.add_argument("--file-list")
     review.add_argument("--dry-run", action="store_true")
-    review.add_argument("--runtime", choices=["container", "local", "auto", "cube"], default="container")
+    review.add_argument("--runtime", choices=["container", "local", "auto"], default="container")
     review.add_argument("--db-url", default=DEFAULT_DB_URL)
     review.add_argument("--output-dir", default=None)
 
@@ -35,13 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_cmd = subparsers.add_parser("eval-fixtures", help="run all fixtures and write eval_summary.json")
     eval_cmd.add_argument("--dry-run", action="store_true")
-    eval_cmd.add_argument("--runtime", choices=["container", "local", "auto", "cube"], default="container")
+    eval_cmd.add_argument("--runtime", choices=["container", "local", "auto"], default="container")
     eval_cmd.add_argument("--db-url", default=DEFAULT_DB_URL)
     eval_cmd.add_argument("--output-dir", default=None)
 
     demo_filter = subparsers.add_parser("demo-filter", help="demonstrate a denied sandbox command")
     demo_filter.add_argument("--dry-run", action="store_true")
-    demo_filter.add_argument("--runtime", choices=["container", "local", "auto", "cube"], default="container")
+    demo_filter.add_argument("--runtime", choices=["container", "local", "auto"], default="container")
     demo_filter.add_argument("--db-url", default=DEFAULT_DB_URL)
     demo_filter.add_argument("--output-dir", default=None)
 

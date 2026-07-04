@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .dedupe import dedupe_findings
+from .dedupe import dedupe_warnings
 from .diff_parser import parse_unified_diff
 from .filter_policy import ReviewExecutionPolicy
 from .input_resolver import EXAMPLE_DIR
@@ -113,9 +114,9 @@ class ReviewOrchestrator:
         sandbox_result = sandbox.run(task_id=task_id, review_input=review_input, runtime=runtime, dry_run=dry_run)
 
         merged_findings = dedupe_findings([*rule_result.findings, *sandbox_result.findings])
-        warnings = sorted([*rule_result.warnings, *sandbox_result.warnings], key=_warning_sort_key)
+        warnings = sorted(dedupe_warnings([*rule_result.warnings, *sandbox_result.warnings]), key=_warning_sort_key)
         needs_human_review = sorted(
-            [*rule_result.needs_human_review, *sandbox_result.needs_human_review],
+            dedupe_warnings([*rule_result.needs_human_review, *sandbox_result.needs_human_review]),
             key=_warning_sort_key,
         )
         telemetry = build_telemetry(
@@ -212,8 +213,8 @@ class ReviewOrchestrator:
             dry_run=dry_run,
             commands=[["rm", "-rf", "/"]],
         )
-        warnings = sorted(sandbox_result.warnings, key=_warning_sort_key)
-        needs_human_review = sorted(sandbox_result.needs_human_review, key=_warning_sort_key)
+        warnings = sorted(dedupe_warnings(sandbox_result.warnings), key=_warning_sort_key)
+        needs_human_review = sorted(dedupe_warnings(sandbox_result.needs_human_review), key=_warning_sort_key)
         telemetry = build_telemetry(
             task_id=task_id,
             parsed_diff=parsed,
