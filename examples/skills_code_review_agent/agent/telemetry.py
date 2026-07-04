@@ -43,8 +43,10 @@ def build_telemetry(
         filter_needs_review_count=sum(1 for item in filter_intercepts if item.decision == "needs_human_review"),
         sandbox_runs_count=len(sandbox_runs),
         sandbox_failures_count=sum(1 for item in sandbox_runs if item.exit_code != 0 or item.timed_out),
+        stdout_truncated_count=sum(1 for item in sandbox_runs if item.stdout_truncated),
+        stderr_truncated_count=sum(1 for item in sandbox_runs if item.stderr_truncated),
+        output_truncated_count=sum(1 for item in sandbox_runs if item.output_truncated),
         redaction_count=redaction_summary.total_redactions,
         debug_dropped_count=debug_dropped_count,
         created_at=utc_now(dry_run),
     )
-

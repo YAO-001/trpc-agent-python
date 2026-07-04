@@ -144,6 +144,9 @@ class SandboxRun(BaseModel):
     stdout: str = ""
     stderr: str = ""
     output_files: dict[str, str] = Field(default_factory=dict)
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    output_truncated: bool = False
     warning: str = ""
     created_at: str = Field(default_factory=utc_now)
 
@@ -160,6 +163,9 @@ class TelemetrySummary(BaseModel):
     filter_needs_review_count: int = 0
     sandbox_runs_count: int = 0
     sandbox_failures_count: int = 0
+    stdout_truncated_count: int = 0
+    stderr_truncated_count: int = 0
+    output_truncated_count: int = 0
     redaction_count: int = 0
     debug_dropped_count: int = 0
     created_at: str = Field(default_factory=utc_now)
@@ -179,6 +185,7 @@ class RedactionSummary(BaseModel):
 
 
 class ReviewReport(BaseModel):
+    schema_version: str = "1.0"
     task_id: str
     conclusion: str
     findings: list[Finding] = Field(default_factory=list)

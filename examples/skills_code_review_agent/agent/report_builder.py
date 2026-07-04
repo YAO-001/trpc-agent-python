@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from .models import FilterIntercept
 from .models import Finding
@@ -50,10 +51,32 @@ def _recommendations(findings: list[Finding], warnings: list[ReviewWarning]) -> 
     return values[:12]
 
 
+def _posix_path(path: Path) -> str:
+    return PurePosixPath(*path.parts).as_posix()
+
+
 class ReportBuilder:
     def __init__(self, output_dir: Path, db_url: str) -> None:
         self.output_dir = output_dir
         self.db_url = db_url
+
+    def _display_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        for base in [Path.cwd().resolve(), self.output_dir.resolve().parent]:
+            try:
+                return _posix_path(resolved.relative_to(base))
+            except ValueError:
+                continue
+        return path.name
+
+    def _display_db_url(self) -> str:
+        prefix = "sqlite:///"
+        if not self.db_url.startswith(prefix) or self.db_url == "sqlite:///:memory:":
+            return self.db_url
+        db_path = Path(self.db_url.removeprefix(prefix))
+        if not db_path.is_absolute():
+            return prefix + _posix_path(db_path)
+        return prefix + self._display_path(db_path)
 
     def build(
         self,
@@ -68,7 +91,10 @@ class ReportBuilder:
         redaction_summary: RedactionSummary,
         input_summary: dict,
     ) -> ReviewReport:
-        query_cmd = f"python examples/skills_code_review_agent/run_review.py query --db-url {self.db_url} --task-id {task_id}"
+        query_cmd = (
+            "python examples/skills_code_review_agent/run_review.py query "
+            f"--db-url {self._display_db_url()} --task-id {task_id}"
+        )
         return ReviewReport(
             task_id=task_id,
             conclusion=_conclusion(findings, needs_human_review),
@@ -85,11 +111,24 @@ class ReportBuilder:
             input_summary=input_summary,
         )
 
-    def write(self, report: ReviewReport) -> tuple[str, str, ReviewReport]:
+    def write(
+        self,
+        report: ReviewReport,
+        *,
+        json_name: str = "review_report.json",
+        markdown_name: str = "review_report.md",
+    ) -> tuple[str, str, ReviewReport]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        json_path = self.output_dir / "review_report.json"
-        md_path = self.output_dir / "review_report.md"
-        report = report.model_copy(update={"report_paths": {"json": str(json_path), "markdown": str(md_path)}})
+        json_path = self.output_dir / json_name
+        md_path = self.output_dir / markdown_name
+        report = report.model_copy(
+            update={
+                "report_paths": {
+                    "json": self._display_path(json_path),
+                    "markdown": self._display_path(md_path),
+                }
+            }
+        )
         json_text = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2)
         markdown = self.to_markdown(report)
         json_path.write_text(json_text + "\n", encoding="utf-8")
@@ -101,6 +140,7 @@ class ReportBuilder:
             "# Code Review Report",
             "",
             f"- Task ID: `{report.task_id}`",
+            f"- Schema version: `{report.schema_version}`",
             f"- Conclusion: {report.conclusion}",
             f"- Database query: `{report.database_query}`",
             "",
@@ -155,10 +195,17 @@ class ReportBuilder:
                 "",
                 f"- Runs: {len(report.sandbox_runs)}",
                 f"- Failures/timeouts: {report.telemetry.sandbox_failures_count}",
+                f"- Stdout truncated: {report.telemetry.stdout_truncated_count}",
+                f"- Stderr truncated: {report.telemetry.stderr_truncated_count}",
+                f"- Output files truncated: {report.telemetry.output_truncated_count}",
             ]
         )
         for run in report.sandbox_runs:
-            lines.append(f"- `{' '.join(run.command)}` exit={run.exit_code} timed_out={run.timed_out}")
+            lines.append(
+                f"- `{' '.join(run.command)}` exit={run.exit_code} timed_out={run.timed_out} "
+                f"stdout_truncated={run.stdout_truncated} stderr_truncated={run.stderr_truncated} "
+                f"output_truncated={run.output_truncated}"
+            )
         lines.extend(
             [
                 "",
@@ -180,4 +227,3 @@ class ReportBuilder:
         lines.extend([f"- {item}" for item in report.recommendations] or ["- No executable recommendations."])
         lines.append("")
         return "\n".join(lines)
-

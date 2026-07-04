@@ -31,6 +31,9 @@ def main() -> int:
         "task_id": payload.get("task_id", ""),
         "redacted_secret_placeholders": sum(by_type.values()),
         "by_type": dict(sorted(by_type.items())),
+        "findings": [],
+        "warnings": [],
+        "needs_human_review": [],
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,4 +43,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

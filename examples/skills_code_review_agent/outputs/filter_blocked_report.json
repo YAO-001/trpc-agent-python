@@ -1,0 +1,63 @@
+{
+  "conclusion": "No deterministic findings.",
+  "database_query": "python examples/skills_code_review_agent/run_review.py query --db-url sqlite:///examples/skills_code_review_agent/review.db --task-id review_3f3730e543647f4c",
+  "filter_intercepts": [
+    {
+      "command": [
+        "rm",
+        "-rf",
+        "/"
+      ],
+      "created_at": "1970-01-01T00:00:00+00:00",
+      "decision": "deny",
+      "intercept_id": "filter_2fde97bce89dbc34",
+      "metadata": {
+        "max_timeout_sec": 60
+      },
+      "reason": "destructive recursive removal is denied",
+      "runtime": "local",
+      "task_id": "review_3f3730e543647f4c"
+    }
+  ],
+  "findings": [],
+  "input_summary": {
+    "effective_runtime": "local",
+    "input_ref": "filter:rm-rf-root",
+    "input_type": "demo_filter"
+  },
+  "needs_human_review": [],
+  "recommendations": [],
+  "redaction_summary": {
+    "by_type": {},
+    "events": [],
+    "total_redactions": 0
+  },
+  "report_paths": {
+    "json": "examples/skills_code_review_agent/outputs/filter_blocked_report.json",
+    "markdown": "examples/skills_code_review_agent/outputs/filter_blocked_report.md"
+  },
+  "sandbox_runs": [],
+  "schema_version": "1.0",
+  "severity_distribution": {},
+  "task_id": "review_3f3730e543647f4c",
+  "telemetry": {
+    "created_at": "1970-01-01T00:00:00+00:00",
+    "debug_dropped_count": 0,
+    "elapsed_ms": 0,
+    "files_changed": 0,
+    "filter_denied_count": 1,
+    "filter_needs_review_count": 0,
+    "findings_count": 0,
+    "lines_added": 0,
+    "needs_human_review_count": 0,
+    "output_truncated_count": 0,
+    "redaction_count": 0,
+    "sandbox_failures_count": 0,
+    "sandbox_runs_count": 0,
+    "stderr_truncated_count": 0,
+    "stdout_truncated_count": 0,
+    "task_id": "review_3f3730e543647f4c",
+    "warnings_count": 0
+  },
+  "warnings": []
+}

@@ -10,6 +10,9 @@ redacted `review_input.json` at `work/inputs/review_input.json`; scripts write
 JSON files under `out/`. Always call `skill_run` with `output_files` instead of
 shell redirection.
 
+The host merges `findings`, `warnings`, and `needs_human_review` emitted by
+these JSON files into the final report after redaction and deduplication.
+
 Allowed commands:
 
 - `python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json`
@@ -18,4 +21,3 @@ Allowed commands:
 
 Do not install packages, request network access, read host secrets, or write
 outside `out/`.
-

@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .dedupe import dedupe_findings
 from .diff_parser import parse_unified_diff
 from .filter_policy import ReviewExecutionPolicy
 from .input_resolver import EXAMPLE_DIR
@@ -111,12 +112,16 @@ class ReviewOrchestrator:
         }
         sandbox_result = sandbox.run(task_id=task_id, review_input=review_input, runtime=runtime, dry_run=dry_run)
 
-        warnings = sorted([*rule_result.warnings], key=_warning_sort_key)
-        needs_human_review = sorted([*rule_result.needs_human_review, *sandbox_result.warnings], key=_warning_sort_key)
+        merged_findings = dedupe_findings([*rule_result.findings, *sandbox_result.findings])
+        warnings = sorted([*rule_result.warnings, *sandbox_result.warnings], key=_warning_sort_key)
+        needs_human_review = sorted(
+            [*rule_result.needs_human_review, *sandbox_result.needs_human_review],
+            key=_warning_sort_key,
+        )
         telemetry = build_telemetry(
             task_id=task_id,
             parsed_diff=parsed,
-            findings=rule_result.findings,
+            findings=merged_findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
             filter_intercepts=sandbox_result.intercepts,
@@ -142,14 +147,14 @@ class ReviewOrchestrator:
             },
         )
         storage.save_sandbox_runs(sandbox_result.runs)
-        storage.save_findings(task_id, rule_result.findings)
+        storage.save_findings(task_id, merged_findings)
         storage.save_filter_intercepts(sandbox_result.intercepts)
         storage.save_telemetry(telemetry)
 
         builder = ReportBuilder(self.output_dir, self.db_url)
         report = builder.build(
             task_id=task_id,
-            findings=rule_result.findings,
+            findings=merged_findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
             filter_intercepts=sandbox_result.intercepts,
@@ -165,6 +170,103 @@ class ReviewOrchestrator:
             },
         )
         json_text, markdown_text, report = builder.write(report)
+        storage.save_report(
+            report=report,
+            json_report=json_text,
+            markdown_report=markdown_text,
+            json_path=report.report_paths["json"],
+            markdown_path=report.report_paths["markdown"],
+        )
+        return report
+
+    def demo_filter(self, *, dry_run: bool = False, runtime: str = "container") -> ReviewReport:
+        started = time.perf_counter()
+        redactor = SecretRedactor()
+        redaction = redactor.redact_text("")
+        parsed = parse_unified_diff(redaction.text)
+        task_id = _stable_task_id(
+            input_type="demo_filter",
+            input_ref="filter:rm-rf-root",
+            redacted_diff=redaction.text,
+            runtime=runtime,
+            dry_run=dry_run,
+        )
+        task = ReviewTask(
+            task_id=task_id,
+            input_type="demo_filter",
+            input_ref="filter:rm-rf-root",
+            runtime=runtime,
+            dry_run=dry_run,
+            status="completed",
+            created_at=utc_now(dry_run),
+        )
+        sandbox = SandboxRunner(
+            example_dir=self.example_dir,
+            policy=ReviewExecutionPolicy(dry_run=dry_run),
+            redactor=redactor,
+        )
+        sandbox_result = sandbox.run(
+            task_id=task_id,
+            review_input={"task_id": task_id, "fixture_names": [], "changed_files": [], "added_lines": []},
+            runtime=runtime,
+            dry_run=dry_run,
+            commands=[["rm", "-rf", "/"]],
+        )
+        warnings = sorted(sandbox_result.warnings, key=_warning_sort_key)
+        needs_human_review = sorted(sandbox_result.needs_human_review, key=_warning_sort_key)
+        telemetry = build_telemetry(
+            task_id=task_id,
+            parsed_diff=parsed,
+            findings=[],
+            warnings=warnings,
+            needs_human_review=needs_human_review,
+            filter_intercepts=sandbox_result.intercepts,
+            sandbox_runs=sandbox_result.runs,
+            redaction_summary=redaction.summary,
+            debug_dropped_count=0,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            dry_run=dry_run,
+        )
+
+        storage = ReviewStorage(self.db_url)
+        storage.reset_task(task_id)
+        storage.save_task(task)
+        storage.save_input(
+            task_id=task_id,
+            redacted_diff=redaction.text,
+            changed_files=[],
+            redaction_summary=redaction.summary,
+            input_metadata={
+                "demo": "filter",
+                "dangerous_command": "rm -rf /",
+                "effective_runtime": sandbox_result.effective_runtime,
+            },
+        )
+        storage.save_sandbox_runs(sandbox_result.runs)
+        storage.save_filter_intercepts(sandbox_result.intercepts)
+        storage.save_telemetry(telemetry)
+
+        builder = ReportBuilder(self.output_dir, self.db_url)
+        report = builder.build(
+            task_id=task_id,
+            findings=[],
+            warnings=warnings,
+            needs_human_review=needs_human_review,
+            filter_intercepts=sandbox_result.intercepts,
+            sandbox_runs=sandbox_result.runs,
+            telemetry=telemetry,
+            redaction_summary=redaction.summary,
+            input_summary={
+                "input_type": "demo_filter",
+                "input_ref": "filter:rm-rf-root",
+                "effective_runtime": sandbox_result.effective_runtime,
+            },
+        )
+        json_text, markdown_text, report = builder.write(
+            report,
+            json_name="filter_blocked_report.json",
+            markdown_name="filter_blocked_report.md",
+        )
         storage.save_report(
             report=report,
             json_report=json_text,

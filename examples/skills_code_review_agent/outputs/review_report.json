@@ -234,6 +234,21 @@
       "title": "pem_private_key secret added to source"
     },
     {
+      "category": "sandbox",
+      "confidence": 0.95,
+      "dedupe_key": "d622f40ff7be1b8faead33bfa48e5c8d71f67645201513b6f136d719e3606029",
+      "evidence": "sandbox_failure fixture is reported only by the Skill script",
+      "file": "src/sandbox_target.py",
+      "line": 2,
+      "recommendation": "Verify that sandbox artifact findings are merged into the final report.",
+      "severity": "low",
+      "source": [
+        "run_static_review.py",
+        "skill:run_static_review"
+      ],
+      "title": "skill-only static review marker"
+    },
+    {
       "category": "security",
       "confidence": 0.96,
       "dedupe_key": "3ca718ce94429cafa6f45cb54961be4bfec4aa7df2d610d14112dea095ee5eb8",
@@ -294,12 +309,25 @@
       "confidence": 1.0,
       "file": "",
       "line": 0,
-      "message": "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: ",
+      "message": "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out",
       "needs_human_review": true,
       "source": [
         "sandbox_runner"
       ],
       "title": "sandbox command failed"
+    },
+    {
+      "category": "sandbox",
+      "confidence": 1.0,
+      "file": "",
+      "line": 0,
+      "message": "sandbox_failure fixture intentionally returns a non-zero smoke-test status.",
+      "needs_human_review": true,
+      "source": [
+        "skill:smoke_test",
+        "smoke_test.py"
+      ],
+      "title": "sandbox smoke test failed"
     },
     {
       "category": "async_resource",
@@ -336,9 +364,9 @@
     "Do not unpickle untrusted input; use a safe serialization format such as JSON.",
     "Use a context manager or close the connection/session in a finally block.",
     "Remove the secret from source, rotate it, and load it from a managed secret store.",
+    "Verify that sandbox artifact findings are merged into the final report.",
     "asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.",
-    "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: ",
-    "await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block."
+    "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out"
   ],
   "redaction_summary": {
     "by_type": {
@@ -390,8 +418,8 @@
     "total_redactions": 6
   },
   "report_paths": {
-    "json": "C:\\Users\\Wu\\Documents\\trpc\\trpc-agent-issue-92\\examples\\skills_code_review_agent\\outputs\\review_report.json",
-    "markdown": "C:\\Users\\Wu\\Documents\\trpc\\trpc-agent-issue-92\\examples\\skills_code_review_agent\\outputs\\review_report.md"
+    "json": "examples/skills_code_review_agent/outputs/review_report.json",
+    "markdown": "examples/skills_code_review_agent/outputs/review_report.md"
   },
   "sandbox_runs": [
     {
@@ -406,17 +434,20 @@
       "created_at": "1970-01-01T00:00:00+00:00",
       "decision": "allow",
       "duration_ms": 0,
-      "exit_code": 2,
+      "exit_code": 0,
       "output_files": {
-        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"error\": \"intentional fixture sandbox failure\",\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"status\": \"failed\",\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+        "out/findings.json": "{\n  \"added_lines\": 43,\n  \"changed_files\": 9,\n  \"findings\": [\n    {\n      \"category\": \"sandbox\",\n      \"confidence\": 0.95,\n      \"evidence\": \"sandbox_failure fixture is reported only by the Skill script\",\n      \"file\": \"src/sandbox_target.py\",\n      \"line\": 2,\n      \"recommendation\": \"Verify that sandbox artifact findings are merged into the final report.\",\n      \"severity\": \"low\",\n      \"source\": [\n        \"run_static_review.py\"\n      ],\n      \"title\": \"skill-only static review marker\"\n    }\n  ],\n  \"fixtures\": [\n    \"clean\",\n    \"security\",\n    \"async_resource_leak\",\n    \"db_lifecycle\",\n    \"missing_tests\",\n    \"duplicate_finding\",\n    \"sandbox_failure\",\n    \"secret_redaction\"\n  ],\n  \"needs_human_review\": [],\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
+      "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_1",
       "runtime": "local",
       "stderr": "",
+      "stderr_truncated": false,
       "stdout": "",
+      "stdout_truncated": false,
       "task_id": "review_21a71a142ea4d1b0",
       "timed_out": false,
-      "warning": "sandbox command failed or timed out"
+      "warning": ""
     },
     {
       "command": [
@@ -432,12 +463,15 @@
       "duration_ms": 0,
       "exit_code": 0,
       "output_files": {
-        "out/secrets.json": "{\n  \"by_type\": {\n    \"aws_access_key\": 1,\n    \"generic_assignment\": 1,\n    \"github_token\": 1,\n    \"jwt\": 1,\n    \"openai_key\": 1,\n    \"pem_private_key\": 1\n  },\n  \"redacted_secret_placeholders\": 6,\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+        "out/secrets.json": "{\n  \"by_type\": {\n    \"aws_access_key\": 1,\n    \"generic_assignment\": 1,\n    \"github_token\": 1,\n    \"jwt\": 1,\n    \"openai_key\": 1,\n    \"pem_private_key\": 1\n  },\n  \"findings\": [],\n  \"needs_human_review\": [],\n  \"redacted_secret_placeholders\": 6,\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
+      "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_2",
       "runtime": "local",
       "stderr": "",
+      "stderr_truncated": false,
       "stdout": "",
+      "stdout_truncated": false,
       "task_id": "review_21a71a142ea4d1b0",
       "timed_out": false,
       "warning": ""
@@ -454,21 +488,26 @@
       "created_at": "1970-01-01T00:00:00+00:00",
       "decision": "allow",
       "duration_ms": 0,
-      "exit_code": 0,
+      "exit_code": 2,
       "output_files": {
-        "out/smoke.json": "{\n  \"message\": \"review input is well formed\",\n  \"status\": \"ok\",\n  \"task_id\": \"review_21a71a142ea4d1b0\"\n}\n"
+        "out/smoke.json": "{\n  \"findings\": [],\n  \"message\": \"intentional fixture smoke failure\",\n  \"needs_human_review\": [\n    {\n      \"category\": \"sandbox\",\n      \"confidence\": 1.0,\n      \"message\": \"sandbox_failure fixture intentionally returns a non-zero smoke-test status.\",\n      \"needs_human_review\": true,\n      \"source\": [\n        \"smoke_test.py\"\n      ],\n      \"title\": \"sandbox smoke test failed\"\n    }\n  ],\n  \"secret_token_in_env\": false,\n  \"status\": \"failed\",\n  \"task_id\": \"review_21a71a142ea4d1b0\",\n  \"warnings\": []\n}\n"
       },
+      "output_truncated": false,
       "run_id": "sandbox_review_21a71a142ea4d1b0_3",
       "runtime": "local",
       "stderr": "",
+      "stderr_truncated": false,
       "stdout": "",
+      "stdout_truncated": false,
       "task_id": "review_21a71a142ea4d1b0",
       "timed_out": false,
-      "warning": ""
+      "warning": "sandbox command failed or timed out"
     }
   ],
+  "schema_version": "1.0",
   "severity_distribution": {
     "high": 13,
+    "low": 1,
     "medium": 5
   },
   "task_id": "review_21a71a142ea4d1b0",
@@ -479,12 +518,15 @@
     "files_changed": 9,
     "filter_denied_count": 0,
     "filter_needs_review_count": 0,
-    "findings_count": 18,
+    "findings_count": 19,
     "lines_added": 43,
-    "needs_human_review_count": 3,
+    "needs_human_review_count": 4,
+    "output_truncated_count": 0,
     "redaction_count": 6,
     "sandbox_failures_count": 1,
     "sandbox_runs_count": 3,
+    "stderr_truncated_count": 0,
+    "stdout_truncated_count": 0,
     "task_id": "review_21a71a142ea4d1b0",
     "warnings_count": 1
   },

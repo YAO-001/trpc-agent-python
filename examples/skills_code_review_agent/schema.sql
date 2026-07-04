@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS sandbox_runs (
     stdout TEXT NOT NULL,
     stderr TEXT NOT NULL,
     output_files_json TEXT NOT NULL,
+    stdout_truncated BOOLEAN NOT NULL DEFAULT 0,
+    stderr_truncated BOOLEAN NOT NULL DEFAULT 0,
+    output_truncated BOOLEAN NOT NULL DEFAULT 0,
     warning TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL
 );
@@ -73,4 +76,3 @@ CREATE TABLE IF NOT EXISTS reports (
     markdown_path TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL
 );
-

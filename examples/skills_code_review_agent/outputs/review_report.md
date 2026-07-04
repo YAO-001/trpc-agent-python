@@ -1,15 +1,16 @@
 # Code Review Report
 
 - Task ID: `review_21a71a142ea4d1b0`
+- Schema version: `1.0`
 - Conclusion: High-confidence issues require changes before merge.
 - Database query: `python examples/skills_code_review_agent/run_review.py query --db-url sqlite:///examples/skills_code_review_agent/review.db --task-id review_21a71a142ea4d1b0`
 
 ## Findings Summary
 
-- Findings: 18
+- Findings: 19
 - Warnings: 1
-- Needs human review: 3
-- Severity distribution: `{"high": 13, "medium": 5}`
+- Needs human review: 4
+- Severity distribution: `{"high": 13, "low": 1, "medium": 5}`
 
 ## Findings
 
@@ -141,6 +142,14 @@
 - Source: `redactor:pem_private_key, rule:secret`
 - Recommendation: Remove the secret from source, rotate it, and load it from a managed secret store.
 
+### LOW sandbox: skill-only static review marker
+
+- Location: `src/sandbox_target.py:2`
+- Evidence: `sandbox_failure fixture is reported only by the Skill script`
+- Confidence: 0.95
+- Source: `run_static_review.py, skill:run_static_review`
+- Recommendation: Verify that sandbox artifact findings are merged into the final report.
+
 ### HIGH security: subprocess invoked with shell=True
 
 - Location: `tools/runner.py:4`
@@ -160,7 +169,8 @@
 ## Warnings And Human Review
 
 - warning: async_resource `app/async_worker.py:10` asyncio.create_task result is not tracked (confidence 0.72) - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
-- needs human review: sandbox `n/a` sandbox command failed (confidence 1.00) - python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: 
+- needs human review: sandbox `n/a` sandbox command failed (confidence 1.00) - python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out
+- needs human review: sandbox `n/a` sandbox smoke test failed (confidence 1.00) - sandbox_failure fixture intentionally returns a non-zero smoke-test status.
 - needs human review: async_resource `app/async_worker.py:11` lock acquired without an obvious release (confidence 0.74) - await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block.
 - needs human review: database `app/repository.py:8` transaction begin lacks rollback on exception path (confidence 0.72) - tx = conn.begin() Recommendation: Rollback in except/finally or use a transaction context manager.
 
@@ -174,9 +184,12 @@
 
 - Runs: 3
 - Failures/timeouts: 1
-- `python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json` exit=2 timed_out=False
-- `python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json` exit=0 timed_out=False
-- `python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json` exit=0 timed_out=False
+- Stdout truncated: 0
+- Stderr truncated: 0
+- Output files truncated: 0
+- `python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json` exit=0 timed_out=False stdout_truncated=False stderr_truncated=False output_truncated=False
+- `python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json` exit=0 timed_out=False stdout_truncated=False stderr_truncated=False output_truncated=False
+- `python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json` exit=2 timed_out=False stdout_truncated=False stderr_truncated=False output_truncated=False
 
 ## Telemetry
 
@@ -200,6 +213,6 @@
 - Do not unpickle untrusted input; use a safe serialization format such as JSON.
 - Use a context manager or close the connection/session in a finally block.
 - Remove the secret from source, rotate it, and load it from a managed secret store.
+- Verify that sandbox artifact findings are merged into the final report.
 - asyncio.create_task(send_metric(url)) Recommendation: Store the task and await, gather, or cancel it during shutdown.
-- python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json exited with 2: 
-- await lock.acquire() Recommendation: Use a with/async with lock guard or release the lock in a finally block.
+- python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json exited with 2: sandbox command failed or timed out

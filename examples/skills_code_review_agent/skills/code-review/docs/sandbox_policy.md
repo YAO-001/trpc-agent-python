@@ -20,4 +20,7 @@ Needs-human-review commands are also not executed:
 - container-to-local fallback records
 
 Only the three documented `python3 scripts/*.py` commands are allowlisted.
-
+Allowed commands run through `SkillToolSet`/`skill_run` for container runtime.
+The explicit local development fallback uses a minimal `SAFE_ENV`, truncates
+large stdout/stderr/output files, and redacts all collected content before the
+host persists sandbox records or merges findings.

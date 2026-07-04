@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--db-url", default=DEFAULT_DB_URL)
     eval_cmd.add_argument("--output-dir", default=None)
 
+    demo_filter = subparsers.add_parser("demo-filter", help="demonstrate a denied sandbox command")
+    demo_filter.add_argument("--dry-run", action="store_true")
+    demo_filter.add_argument("--runtime", choices=["container", "local", "auto", "cube"], default="container")
+    demo_filter.add_argument("--db-url", default=DEFAULT_DB_URL)
+    demo_filter.add_argument("--output-dir", default=None)
+
     return parser
 
 
@@ -91,10 +97,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         _print_json(summary)
         return 0
+    if args.command == "demo-filter":
+        report = ReviewOrchestrator(db_url=args.db_url, output_dir=args.output_dir).demo_filter(
+            dry_run=args.dry_run,
+            runtime=args.runtime,
+        )
+        _print_json(
+            {
+                "task_id": report.task_id,
+                "conclusion": report.conclusion,
+                "filter_intercepts": len(report.filter_intercepts),
+                "sandbox_runs": len(report.sandbox_runs),
+                "report_paths": report.report_paths,
+                "database_query": report.database_query,
+            }
+        )
+        return 0
     parser.error(f"unknown command {args.command}")
     return 2
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

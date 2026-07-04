@@ -61,10 +61,10 @@
       "warnings": 1
     },
     {
-      "conclusion": "No high-confidence findings, but human review is needed for warnings or sandbox state.",
-      "findings": 0,
+      "conclusion": "Review found deterministic issues to address.",
+      "findings": 1,
       "fixture": "sandbox_failure",
-      "needs_human_review": 1,
+      "needs_human_review": 2,
       "redactions": 0,
       "sandbox_failures": 1,
       "task_id": "review_88e837641507676a",
@@ -81,7 +81,7 @@
       "warnings": 1
     }
   ],
-  "total_findings": 18,
+  "total_findings": 19,
   "total_fixtures": 8,
-  "total_needs_human_review": 3
+  "total_needs_human_review": 4
 }

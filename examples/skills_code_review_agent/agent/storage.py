@@ -22,6 +22,7 @@ from sqlalchemy import Text
 from sqlalchemy import create_engine
 from sqlalchemy import delete
 from sqlalchemy import select
+from sqlalchemy import text
 
 from .models import FilterIntercept
 from .models import Finding
@@ -70,6 +71,9 @@ sandbox_runs = Table(
     Column("stdout", Text, nullable=False),
     Column("stderr", Text, nullable=False),
     Column("output_files_json", Text, nullable=False),
+    Column("stdout_truncated", Boolean, nullable=False, default=False),
+    Column("stderr_truncated", Boolean, nullable=False, default=False),
+    Column("output_truncated", Boolean, nullable=False, default=False),
     Column("warning", Text, nullable=False),
     Column("created_at", String(64), nullable=False),
 )
@@ -126,6 +130,7 @@ class ReviewStorage:
         self._ensure_sqlite_parent(db_url)
         self.engine = create_engine(db_url, future=True)
         metadata.create_all(self.engine)
+        self._ensure_schema_compat()
 
     @staticmethod
     def _ensure_sqlite_parent(db_url: str) -> None:
@@ -134,6 +139,21 @@ class ReviewStorage:
         path = Path(db_url.removeprefix("sqlite:///"))
         if path.parent:
             path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_schema_compat(self) -> None:
+        if self.engine.dialect.name != "sqlite":
+            return
+        required = {
+            "stdout_truncated": "BOOLEAN NOT NULL DEFAULT 0",
+            "stderr_truncated": "BOOLEAN NOT NULL DEFAULT 0",
+            "output_truncated": "BOOLEAN NOT NULL DEFAULT 0",
+        }
+        with self.engine.begin() as conn:
+            rows = conn.execute(text("PRAGMA table_info(sandbox_runs)")).mappings().all()
+            existing = {row["name"] for row in rows}
+            for column, definition in required.items():
+                if column not in existing:
+                    conn.execute(text(f"ALTER TABLE sandbox_runs ADD COLUMN {column} {definition}"))
 
     def reset_task(self, task_id: str) -> None:
         with self.engine.begin() as conn:
@@ -202,6 +222,9 @@ class ReviewStorage:
                 "stdout": item.stdout,
                 "stderr": item.stderr,
                 "output_files_json": json.dumps(item.output_files, ensure_ascii=False, sort_keys=True),
+                "stdout_truncated": item.stdout_truncated,
+                "stderr_truncated": item.stderr_truncated,
+                "output_truncated": item.output_truncated,
                 "warning": item.warning,
                 "created_at": item.created_at,
             }
@@ -278,4 +301,3 @@ class ReviewStorage:
 
     def dump_task_text(self, task_id: str) -> str:
         return json.dumps(self.query_task(task_id), ensure_ascii=False, sort_keys=True, default=str)
-
