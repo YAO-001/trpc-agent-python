@@ -11,4 +11,3 @@ from __future__ import annotations
 class FakeReviewModel:
     def complete(self, prompt: str) -> str:
         return "dry-run: deterministic rule engine completed"
-

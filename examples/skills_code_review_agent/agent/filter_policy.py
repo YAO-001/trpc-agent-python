@@ -17,7 +17,14 @@ from .models import utc_now
 
 
 ALLOWED_SKILL_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("python3", "scripts/run_static_review.py", "--input", "work/inputs/review_input.json", "--output", "out/findings.json"),
+    (
+        "python3",
+        "scripts/run_static_review.py",
+        "--input",
+        "work/inputs/review_input.json",
+        "--output",
+        "out/findings.json",
+    ),
     ("python3", "scripts/secret_scan.py", "--input", "work/inputs/review_input.json", "--output", "out/secrets.json"),
     ("python3", "scripts/smoke_test.py", "--input", "work/inputs/review_input.json", "--output", "out/smoke.json"),
 )
@@ -30,7 +37,13 @@ class PolicyDecision:
 
 
 class ReviewExecutionPolicy:
-    def __init__(self, *, max_timeout_sec: int = 60, env_whitelist: set[str] | None = None, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        max_timeout_sec: int = 60,
+        env_whitelist: set[str] | None = None,
+        dry_run: bool = False,
+    ) -> None:
         self.max_timeout_sec = max_timeout_sec
         self.env_whitelist = env_whitelist or set()
         self.dry_run = dry_run
@@ -57,7 +70,12 @@ class ReviewExecutionPolicy:
             return self._decision("needs_human_review", review_reason, command, runtime)
         if tuple(command) in ALLOWED_SKILL_COMMANDS:
             return self._decision("allow", "command matches code-review skill allowlist", command, runtime)
-        return self._decision("needs_human_review", "command is outside the code-review skill allowlist", command, runtime)
+        return self._decision(
+            "needs_human_review",
+            "command is outside the code-review skill allowlist",
+            command,
+            runtime,
+        )
 
     def runtime_fallback(self, *, task_id: str, from_runtime: str, to_runtime: str) -> FilterIntercept:
         intercept = self._decision(
@@ -91,11 +109,18 @@ class ReviewExecutionPolicy:
                 return f"sandbox access to protected path {token!r} is denied"
         for pattern in output_files:
             normalized = pattern.replace("\\", "/")
-            if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized) or "../" in normalized or normalized == "..":
+            if (
+                normalized.startswith("/")
+                or re.match(r"^[A-Za-z]:/", normalized)
+                or "../" in normalized
+                or normalized == ".."
+            ):
                 return f"unsafe output glob {pattern!r} is denied"
         for key in env:
             upper = key.upper()
-            if key not in self.env_whitelist and any(marker in upper for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")):
+            if key not in self.env_whitelist and any(
+                marker in upper for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")
+            ):
                 return f"environment key {key!r} is denied unless explicitly whitelisted"
         if timeout > self.max_timeout_sec:
             return f"timeout {timeout}s exceeds max_timeout_sec={self.max_timeout_sec}"
@@ -128,4 +153,3 @@ class ReviewExecutionPolicy:
                 created_at=utc_now(self.dry_run),
             ),
         )
-

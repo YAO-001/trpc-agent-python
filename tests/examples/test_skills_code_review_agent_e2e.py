@@ -59,7 +59,10 @@ def test_skill_run_filter_denies_secret_env():
         None,
         SimpleNamespace(name="skill_run"),
         {
-            "command": "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json",
+            "command": (
+                "python3 scripts/run_static_review.py --input work/inputs/review_input.json "
+                "--output out/findings.json"
+            ),
             "output_files": ["out/findings.json"],
             "env": {"SECRET_TOKEN": "x"},
             "timeout": 30,
@@ -244,7 +247,14 @@ def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypat
         policy=ReviewExecutionPolicy(dry_run=True),
         redactor=SecretRedactor(),
     )
-    command = ["python3", "scripts/smoke_test.py", "--input", "work/inputs/review_input.json", "--output", "out/smoke.json"]
+    command = [
+        "python3",
+        "scripts/smoke_test.py",
+        "--input",
+        "work/inputs/review_input.json",
+        "--output",
+        "out/smoke.json",
+    ]
 
     env_result = runner.run(
         task_id="task-safe-env",

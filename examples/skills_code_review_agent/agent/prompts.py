@@ -11,4 +11,3 @@ skill_run commands with output_files, and rely on the deterministic JSON result
 instead of inventing findings. Never request network access unless a human has
 approved it.
 """.strip()
-

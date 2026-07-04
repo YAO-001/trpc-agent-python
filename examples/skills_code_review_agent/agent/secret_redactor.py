@@ -31,7 +31,10 @@ class RedactionResult:
 
 class SecretRedactor:
     _patterns = [
-        _SecretPattern("pem_private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----")),
+        _SecretPattern(
+            "pem_private_key",
+            re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----"),
+        ),
         _SecretPattern("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
         _SecretPattern("github_token", re.compile(r"\bghp_[A-Za-z0-9_]{36,}\b")),
         _SecretPattern("github_token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),

@@ -4,4 +4,3 @@
 #
 # tRPC-Agent-Python is licensed under Apache-2.0.
 """Deterministic code review example agent."""
-

@@ -17,7 +17,14 @@ def _nearby_text(line: ChangedLine) -> str:
     return "\n".join(line.context_before + [line.content] + line.context_after).lower()
 
 
-def _finding(line: ChangedLine, title: str, evidence: str, recommendation: str, confidence: float, severity: str = "medium") -> Finding:
+def _finding(
+    line: ChangedLine,
+    title: str,
+    evidence: str,
+    recommendation: str,
+    confidence: float,
+    severity: str = "medium",
+) -> Finding:
     return Finding(
         severity=severity,
         category="database",
@@ -65,4 +72,3 @@ def run_database_rules(lines: list[ChangedLine]) -> list[Finding]:
                     )
                 )
     return findings
-

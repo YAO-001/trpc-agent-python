@@ -29,7 +29,10 @@ def dedupe_findings(findings: list[Finding]) -> list[Finding]:
         if current is None:
             grouped[key] = finding
             continue
-        if (severity_rank(finding.severity), finding.confidence) > (severity_rank(current.severity), current.confidence):
+        if (
+            severity_rank(finding.severity),
+            finding.confidence,
+        ) > (severity_rank(current.severity), current.confidence):
             grouped[key] = finding
     return sorted(
         [

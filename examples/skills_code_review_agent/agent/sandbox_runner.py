@@ -171,7 +171,10 @@ class LocalSkillHarness:
             (workspace_skill / "work" / "inputs").mkdir(parents=True, exist_ok=True)
             (workspace_skill / "out").mkdir(parents=True, exist_ok=True)
             input_path = workspace_skill / "work" / "inputs" / "review_input.json"
-            input_path.write_text(json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+            input_path.write_text(
+                json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
             runs = [
                 self._run_command(
                     task_id=task_id,
@@ -310,11 +313,18 @@ class TrpcSkillToolSetHarness:
 
         with tempfile.TemporaryDirectory(prefix="skills_code_review_input_") as tmp:
             input_path = Path(tmp) / "review_input.json"
-            input_path.write_text(json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+            input_path.write_text(
+                json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
             tool_set = create_skill_tool_set(runtime=self.runtime)
             calls_by_command = {call["command"]: call for call in build_skill_run_calls(str(input_path))}
             service = InMemorySessionService()
-            session = await service.create_session(app_name="skills_code_review_agent", user_id="dry-run", session_id=task_id)
+            session = await service.create_session(
+                app_name="skills_code_review_agent",
+                user_id="dry-run",
+                session_id=task_id,
+            )
             ctx = InvocationContext(
                 session_service=service,
                 invocation_id=f"invocation-{task_id}",
@@ -444,7 +454,13 @@ class SandboxRunner:
             ).runs
         except Exception as exc:  # pylint: disable=broad-except
             if runtime == "auto":
-                intercepts.append(self.policy.runtime_fallback(task_id=task_id, from_runtime="container", to_runtime="local"))
+                intercepts.append(
+                    self.policy.runtime_fallback(
+                        task_id=task_id,
+                        from_runtime="container",
+                        to_runtime="local",
+                    )
+                )
                 needs_human_review.append(
                     _runtime_warning(
                         "container runtime fell back to local",

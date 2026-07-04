@@ -99,7 +99,9 @@ class RuleEngine:
         return RuleEngineResult(
             findings=findings,
             warnings=sorted(warnings, key=lambda item: (item.file, item.line, item.category, item.title)),
-            needs_human_review=sorted(needs_human_review, key=lambda item: (item.file, item.line, item.category, item.title)),
+            needs_human_review=sorted(
+                needs_human_review,
+                key=lambda item: (item.file, item.line, item.category, item.title),
+            ),
             debug_dropped_count=dropped,
         )
-

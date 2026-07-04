@@ -90,4 +90,3 @@ def run_security_rules(lines: list[ChangedLine]) -> list[Finding]:
                 )
             )
     return findings
-

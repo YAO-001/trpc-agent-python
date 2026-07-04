@@ -32,9 +32,11 @@ def run_test_rules(parsed_diff: ParsedDiff) -> list[Finding]:
             line=first_line,
             title="code changed without nearby test changes",
             evidence=", ".join(sorted(changed_code)),
-            recommendation="Add or update focused tests for the changed behavior, or document why existing coverage is sufficient.",
+            recommendation=(
+                "Add or update focused tests for the changed behavior, "
+                "or document why existing coverage is sufficient."
+            ),
             confidence=0.66,
             source=["rule:test"],
         )
     ]
-

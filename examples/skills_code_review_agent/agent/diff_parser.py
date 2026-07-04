@@ -121,7 +121,12 @@ def parse_unified_diff(diff_text: str) -> ParsedDiff:
     _finalize_file(current, events)
     added_lines = [line for file_change in files for line in file_change.added_lines]
     changed_files = [file_change.new_file for file_change in files if file_change.new_file != "/dev/null"]
-    return ParsedDiff(files=files, added_lines=added_lines, changed_files=changed_files, total_added_lines=len(added_lines))
+    return ParsedDiff(
+        files=files,
+        added_lines=added_lines,
+        changed_files=changed_files,
+        total_added_lines=len(added_lines),
+    )
 
 
 def is_test_file(path: str) -> bool:
@@ -142,4 +147,3 @@ def is_test_file(path: str) -> bool:
 def code_files(paths: Iterable[str]) -> list[str]:
     suffixes = (".py", ".js", ".ts", ".tsx", ".go", ".java", ".rs", ".rb")
     return [path for path in paths if path.lower().endswith(suffixes) and not is_test_file(path)]
-

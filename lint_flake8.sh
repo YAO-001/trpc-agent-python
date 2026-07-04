@@ -8,14 +8,24 @@ set -euo pipefail
 
 TARGET_PATH="${1:-.}"
 
-if ! command -v flake8 >/dev/null 2>&1; then
+if command -v flake8 >/dev/null 2>&1; then
+  FLAKE8=(flake8)
+elif command -v python3 >/dev/null 2>&1 && python3 -m flake8 --version >/dev/null 2>&1; then
+  FLAKE8=(python3 -m flake8)
+elif command -v python >/dev/null 2>&1 && python -m flake8 --version >/dev/null 2>&1; then
+  FLAKE8=(python -m flake8)
+elif command -v python.exe >/dev/null 2>&1 && python.exe -m flake8 --version >/dev/null 2>&1; then
+  FLAKE8=(python.exe -m flake8)
+elif command -v py.exe >/dev/null 2>&1 && py.exe -3 -m flake8 --version >/dev/null 2>&1; then
+  FLAKE8=(py.exe -3 -m flake8)
+else
   echo "flake8 is not installed. Install it first:"
-  echo "  python3 -m pip install flake8"
+  echo "  python -m pip install flake8"
   exit 1
 fi
 
 echo "Running flake8 on: ${TARGET_PATH}"
 
-flake8 "${TARGET_PATH}" \
+"${FLAKE8[@]}" "${TARGET_PATH}" \
   --max-line-length=120 \
   --extend-exclude=".git,__pycache__,.pytest_cache,.mypy_cache,.ruff_cache,venv,.venv,build,dist,node_modules"

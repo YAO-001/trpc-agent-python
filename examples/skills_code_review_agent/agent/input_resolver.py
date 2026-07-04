@@ -92,5 +92,10 @@ def resolve_review_input(
     extra_files = _read_file_list(file_list)
     if not extra_files:
         return resolved
-    return ResolvedInput(resolved.input_type, resolved.input_ref, resolved.diff_text, resolved.fixture_names, extra_files)
-
+    return ResolvedInput(
+        resolved.input_type,
+        resolved.input_ref,
+        resolved.diff_text,
+        resolved.fixture_names,
+        extra_files,
+    )

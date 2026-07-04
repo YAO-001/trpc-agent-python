@@ -54,7 +54,10 @@ def build_skill_run_calls(input_path: str | None = None) -> list[dict[str, Any]]
         {
             "skill": "code-review",
             "cwd": "$SKILLS_DIR/code-review",
-            "command": "python3 scripts/run_static_review.py --input work/inputs/review_input.json --output out/findings.json",
+            "command": (
+                "python3 scripts/run_static_review.py --input work/inputs/review_input.json "
+                "--output out/findings.json"
+            ),
             "output_files": ["out/findings.json"],
             "inputs": inputs,
             "timeout": 30,

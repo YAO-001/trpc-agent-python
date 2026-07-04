@@ -157,7 +157,15 @@ class ReviewStorage:
 
     def reset_task(self, task_id: str) -> None:
         with self.engine.begin() as conn:
-            for table in [reports, telemetry_summaries, filter_intercepts, findings, sandbox_runs, review_inputs, review_tasks]:
+            for table in [
+                reports,
+                telemetry_summaries,
+                filter_intercepts,
+                findings,
+                sandbox_runs,
+                review_inputs,
+                review_tasks,
+            ]:
                 conn.execute(delete(table).where(table.c.task_id == task_id))
 
     def save_task(self, task: ReviewTask) -> None:
