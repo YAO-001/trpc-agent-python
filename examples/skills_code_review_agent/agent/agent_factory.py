@@ -8,15 +8,20 @@
 from __future__ import annotations
 
 import json
+import shlex
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from .execution_request import ExecutionPlan
 from .execution_request import ExecutionRequest
 from .execution_request import PolicyContext
+from .filter_policy import PolicyDecision
 from .filter_policy import ReviewExecutionPolicy
 from .secret_redactor import SecretRedactor
 
@@ -217,26 +222,70 @@ def prepare_execution_plan(
         yield ExecutionPlan(requests=requests, policy_context=policy_context)
 
 
-def review_before_tool_callback(context, tool, args: dict, response=None):  # pylint: disable=unused-argument
-    if getattr(tool, "name", "") != "skill_run":
-        return None
-    command = str(args.get("command", "")).split()
-    output_files = list(args.get("output_files") or [])
-    env = dict(args.get("env") or {})
-    timeout = int(args.get("timeout") or 30)
-    decision = ReviewExecutionPolicy(max_timeout_sec=60).evaluate(
-        command=command,
-        runtime="container",
-        output_files=output_files,
-        env=env,
-        timeout=timeout,
-        network_access=bool(args.get("network_access")),
-    )
-    if decision.decision == "allow":
-        return None
+def _blocked_tool_response(decision: PolicyDecision) -> dict[str, Any]:
     return {
         "blocked": True,
         "decision": decision.decision,
         "reason": decision.intercept.reason,
         "intercept": decision.intercept.model_dump(mode="json"),
     }
+
+
+def make_review_before_tool_callback(
+    policy: ReviewExecutionPolicy,
+    policy_context: PolicyContext,
+    requests_by_command: Mapping[tuple[str, ...], ExecutionRequest],
+):
+    """Build an SDK callback that guards an already-approved request."""
+    expected_by_command = {tuple(command): request for command, request in requests_by_command.items()}
+    if not expected_by_command:
+        raise ValueError("requests_by_command must contain at least one validated request")
+    representative_request = next(iter(expected_by_command.values()))
+
+    def before_tool_callback(context, tool, args, response=None):  # pylint: disable=unused-argument
+        if getattr(tool, "name", "") != "skill_run":
+            return None
+        expected = representative_request
+        if type(args) is not dict:
+            return _blocked_tool_response(
+                policy._decision(
+                    "deny",
+                    "invalid skill_run request",
+                    representative_request,
+                    policy_context,
+                ))
+        try:
+            raw_args = dict(args)
+            raw_command = raw_args.get("command")
+            if not isinstance(raw_command, str):
+                raise TypeError("skill_run command must be a string")
+            command_argv = tuple(shlex.split(raw_command, posix=True))
+            expected = expected_by_command.get(command_argv)
+            if expected is None:
+                unknown = representative_request.model_copy(update={
+                    "request_id": "unknown",
+                    "command_argv": command_argv,
+                })
+                return _blocked_tool_response(policy._decision("deny", "unknown request", unknown, policy_context))
+            actual = ExecutionRequest.from_skill_run_args(
+                request_id=expected.request_id,
+                task_id=expected.task_id,
+                runtime=expected.runtime,
+                args=raw_args,
+            )
+        except (TypeError, ValueError, ValidationError):
+            invalid = expected or representative_request
+            return _blocked_tool_response(policy._decision("deny", "invalid skill_run request", invalid,
+                                                           policy_context))
+
+        decision = policy.evaluate(actual, policy_context)
+        if actual != expected:
+            return _blocked_tool_response(
+                policy._decision("deny", "request changed after validation", actual, policy_context))
+        if decision.decision == "allow":
+            args.clear()
+            args.update(actual.to_skill_run_args())
+            return None
+        return _blocked_tool_response(decision)
+
+    return before_tool_callback

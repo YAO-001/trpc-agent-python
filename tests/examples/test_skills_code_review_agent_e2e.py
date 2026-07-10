@@ -7,16 +7,17 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from agent import agent_factory
 from agent import sandbox_runner as sandbox_module
-from agent.agent_factory import review_before_tool_callback
+from agent.agent_factory import prepare_execution_plan
 from agent.filter_policy import ReviewExecutionPolicy
 from agent.input_resolver import EXAMPLE_DIR
 from agent.models import SandboxRun
@@ -26,6 +27,8 @@ from agent.sandbox_runner import HarnessExecutionResult
 from agent.sandbox_runner import SandboxRunner
 from agent.secret_redactor import SecretRedactor
 from agent.storage import ReviewStorage
+from trpc_agent_sdk.skills import FsSkillRepository
+from trpc_agent_sdk.tools import BaseTool
 
 RAW_SAMPLE_SECRETS = [
     "AKIAIOSFODNN7EXAMPLE",
@@ -82,48 +85,370 @@ def _run_static_review_script(tmp_path, payload):
     return json.loads(output_path.read_text(encoding="utf-8"))
 
 
-def test_filter_deny_before_sandbox_execution():
+@pytest.mark.parametrize(
+    ("command", "error_kind"),
+    (
+        (("rm", "-rf", "/"), "policy_denied"),
+        (("pip", "install", "unapproved-package"), "approval_required"),
+    ),
+)
+def test_filter_nonallow_request_returns_before_harness_lookup(monkeypatch, command, error_kind):
     runner = SandboxRunner(
         example_dir=EXAMPLE_DIR,
         policy=ReviewExecutionPolicy(dry_run=True),
         redactor=SecretRedactor(),
     )
+    harness_calls = []
+    decision_callbacks = []
+    run_callbacks = []
 
-    result = runner.run(
-        task_id="task-filter",
-        review_input={
-            "task_id": "task-filter",
-            "fixture_names": []
-        },
-        runtime="local",
-        dry_run=True,
-        commands=[["rm", "-rf", "/"]],
-    )
+    class ExplodingHarness:
 
+        def execute_one(self, **kwargs):
+            raise AssertionError(f"non-allow request reached harness: {kwargs}")
+
+    def exploding_lookup(*, runtime):
+        harness_calls.append(runtime)
+        return ExplodingHarness()
+
+    monkeypatch.setattr(runner, "_harness_for_runtime", exploding_lookup, raising=False)
+
+    review_input = {
+        "task_id": "task-filter",
+        "fixture_names": [],
+    }
+    with prepare_execution_plan(task_id="task-filter",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        request = plan.requests[0].model_copy(update={
+            "request_id": "task-filter:mutated",
+            "command_argv": command,
+        })
+        result = runner.run(
+            task_id="task-filter",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[request],
+            policy_context=plan.policy_context,
+            on_decision=decision_callbacks.append,
+            on_run=run_callbacks.append,
+        )
+
+    assert harness_calls == []
     assert result.runs == []
-    assert len(result.intercepts) == 1
-    assert result.intercepts[0].decision == "deny"
+    assert run_callbacks == []
+    assert len(result.decisions) == 1
+    assert decision_callbacks == result.decisions
+    assert result.decisions[0].metadata["error_kind"] == error_kind
 
 
-def test_skill_run_filter_denies_secret_env():
-    result = review_before_tool_callback(
-        None,
-        SimpleNamespace(name="skill_run"),
-        {
-            "command": ("python3 scripts/run_static_review.py --input work/inputs/review_input.json "
-                        "--output out/findings.json"),
-            "output_files": ["out/findings.json"],
-            "env": {
-                "SECRET_TOKEN": "x"
-            },
-            "timeout":
-            30,
-        },
+def test_code_review_repository_has_no_dynamic_run_env():
+    repository = FsSkillRepository(str(EXAMPLE_DIR / "skills"))
+
+    assert repository.skill_run_env("code-review") == {}
+
+
+def test_local_inherited_env_keys_are_minimal_on_posix():
+    host_env = {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/tmp",
+        "TEMP": "/tmp/temp",
+        "TMP": "/tmp/tmp",
+        "SystemRoot": "posix-system-root-secret",
+        "COMSPEC": "posix-comspec-secret",
+        "WINDIR": "posix-windir-secret",
+        "PATHEXT": "posix-pathext-secret",
+        "Path": "posix-path-alias-secret",
+        "HOME": "home-secret",
+        "PYTHONPATH": "pythonpath-secret",
+        "API_TOKEN": "api-token-secret",
+    }
+
+    inherited = sandbox_module._inherited_platform_env(host_env, platform_name="posix")
+
+    assert inherited == {
+        "PATH": "/usr/bin",
+        "TMPDIR": "/tmp",
+        "TEMP": "/tmp/temp",
+        "TMP": "/tmp/tmp",
+    }
+
+
+def test_local_inherited_env_keys_keep_windows_launch_requirements():
+    host_env = {
+        "PATH": "C:\\Windows\\System32",
+        "Path": "C:\\Windows\\System32",
+        "TMPDIR": "C:\\TempDir",
+        "TEMP": "C:\\Temp",
+        "TMP": "C:\\Tmp",
+        "PATHEXT": ".EXE;.CMD",
+        "SYSTEMROOT": "C:\\Windows-upper",
+        "SystemRoot": "C:\\Windows",
+        "WINDIR": "C:\\Windows",
+        "COMSPEC": "C:\\Windows\\System32\\cmd.exe",
+        "HOME": "home-secret",
+        "PYTHONPATH": "pythonpath-secret",
+        "API_TOKEN": "api-token-secret",
+    }
+
+    inherited = sandbox_module._inherited_platform_env(host_env, platform_name="nt")
+
+    assert inherited == {
+        key: value
+        for key, value in host_env.items() if key not in {"HOME", "PYTHONPATH", "API_TOKEN"}
+    }
+
+
+def test_runner_evaluates_supplied_requests_then_executes_allowed_requests_in_id_order(monkeypatch):
+    events = []
+
+    class RecordingHarness:
+
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
+            events.append(("execute", request.request_id))
+            return HarnessExecutionResult(runs=[
+                SandboxRun(
+                    run_id=f"sandbox_{request.request_id}",
+                    task_id=task_id,
+                    runtime=request.runtime,
+                    command=list(request.command_argv),
+                    decision="allow",
+                    output_files={},
+                    created_at="1970-01-01T00:00:00+00:00",
+                )
+            ])
+
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
     )
+    monkeypatch.setattr(runner, "_harness_for_runtime", lambda *, runtime: RecordingHarness(), raising=False)
+    review_input = {"task_id": "task-order", "fixture_names": []}
+    decisions = []
+    runs = []
 
-    assert result["blocked"] is True
-    assert result["decision"] == "deny"
-    assert "SECRET_TOKEN" in result["reason"]
+    with prepare_execution_plan(task_id="task-order",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        supplied = list(reversed(plan.requests))
+        result = runner.run(
+            task_id="task-order",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=supplied,
+            policy_context=plan.policy_context,
+            on_decision=lambda item: (decisions.append(item), events.append(("decision", item.metadata["request_id"]))),
+            on_run=lambda item: (runs.append(item), events.append(("run", item.run_id))),
+        )
+
+    assert [item.metadata["request_id"] for item in decisions] == [request.request_id for request in supplied]
+    assert [event for event in events if event[0] == "execute"
+            ] == [("execute", request.request_id) for request in sorted(supplied, key=lambda item: item.request_id)]
+    assert all(event[0] == "decision" for event in events[:3])
+    assert runs == result.runs
+    assert result.decisions == decisions
+
+
+def test_explicit_local_harness_does_not_inherit_sensitive_host_env(monkeypatch):
+    host_values = {
+        "API_TOKEN": "host-api-token-value",
+        "HOME": "host-home-secret-value",
+        "PYTHONPATH": "host-python-path-secret-value",
+    }
+    for name, value in host_values.items():
+        monkeypatch.setenv(name, value)
+    captured_envs = []
+    real_run = sandbox_module.subprocess.run
+
+    def checked_run(*args, **kwargs):
+        captured_envs.append(dict(kwargs["env"]))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_module.subprocess, "run", checked_run)
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-safe-env", "fixture_names": []}
+
+    with prepare_execution_plan(task_id="task-safe-env",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        result = runner.run(
+            task_id="task-safe-env",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[2]],
+            policy_context=plan.policy_context,
+        )
+
+    assert captured_envs
+    assert all(name not in captured_envs[0] for name in host_values)
+    assert captured_envs[0]["PYTHONUNBUFFERED"] == "1"
+    assert captured_envs[0]["TRPC_AGENT_SKILL_NAME"] == "code-review"
+    serialized_output = json.dumps(result.runs[0].output_files, sort_keys=True)
+    for raw_value in host_values.values():
+        assert raw_value not in serialized_output
+
+
+def _install_sdk_output_toolset(monkeypatch, *, mutate_args, output, handler_calls):
+
+    class RealSkillRunTool(BaseTool):
+
+        def __init__(self):
+            super().__init__(name="skill_run", description="exercise the real BaseTool filter chain")
+
+        async def _run_async_impl(self, *, tool_context, args):
+            handler_calls.append(copy.deepcopy(args))
+            return output
+
+    class ToolProxy:
+        name = "skill_run"
+
+        def __init__(self):
+            self.real_tool = RealSkillRunTool()
+
+        async def run_async(self, *, tool_context, args):
+            forwarded = copy.deepcopy(args)
+            mutate_args(forwarded)
+            return await self.real_tool.run_async(tool_context=tool_context, args=forwarded)
+
+    class FakeToolSet:
+
+        async def get_tools(self, context):
+            return [ToolProxy()]
+
+    monkeypatch.setattr(agent_factory, "create_skill_tool_set", lambda runtime: FakeToolSet())
+
+
+def test_skill_run_sdk_blocked_response_never_becomes_allow_run(monkeypatch):
+    handler_calls = []
+
+    def remove_inline(args):
+        del args["outputs"]["inline"]
+
+    _install_sdk_output_toolset(
+        monkeypatch,
+        mutate_args=remove_inline,
+        output={"exit_code": 0},
+        handler_calls=handler_calls,
+    )
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-sdk-block", "fixture_names": []}
+    on_runs = []
+
+    with prepare_execution_plan(task_id="task-sdk-block",
+                                runtime="container",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        result = runner.run(
+            task_id="task-sdk-block",
+            review_input=review_input,
+            runtime="container",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+            on_run=on_runs.append,
+        )
+
+    assert handler_calls == []
+    assert result.runs == []
+    assert on_runs == []
+    assert result.needs_human_review
+    assert "integrity" in result.needs_human_review[0].message.lower()
+
+
+def test_skill_run_non_mapping_sdk_output_fails_closed(monkeypatch):
+    handler_calls = []
+    _install_sdk_output_toolset(
+        monkeypatch,
+        mutate_args=lambda args: None,
+        output="not-a-mapping",
+        handler_calls=handler_calls,
+    )
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-sdk-type", "fixture_names": []}
+
+    with prepare_execution_plan(task_id="task-sdk-type",
+                                runtime="container",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        result = runner.run(
+            task_id="task-sdk-type",
+            review_input=review_input,
+            runtime="container",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+        )
+
+    assert len(handler_calls) == 1
+    assert result.runs == []
+    assert result.needs_human_review
+
+
+def test_skill_run_handler_receives_callback_canonicalized_plain_dict(monkeypatch):
+    handler_calls = []
+
+    def make_equivalent_but_noncanonical(args):
+        args["command"] = ("python3 'scripts/run_static_review.py' --input work/inputs/review_input.json "
+                           "--output out/findings.json")
+        args["inputs"] = tuple(args["inputs"])
+
+    _install_sdk_output_toolset(
+        monkeypatch,
+        mutate_args=make_equivalent_but_noncanonical,
+        output={
+            "exit_code": 0,
+            "timed_out": False,
+            "duration_ms": 0,
+            "stdout": "",
+            "stderr": "",
+            "output_files": [],
+            "warnings": [],
+        },
+        handler_calls=handler_calls,
+    )
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-sdk-canonical", "fixture_names": []}
+
+    with prepare_execution_plan(task_id="task-sdk-canonical",
+                                runtime="container",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        canonical_args = plan.requests[0].to_skill_run_args()
+        result = runner.run(
+            task_id="task-sdk-canonical",
+            review_input=review_input,
+            runtime="container",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+        )
+
+    assert handler_calls == [canonical_args]
+    assert len(result.runs) == 1
+    assert result.runs[0].decision == "allow"
 
 
 def test_skill_static_review_emits_real_security_finding(tmp_path):
@@ -419,12 +744,12 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
 
     class FakeTrpcSkillToolSetHarness:
 
-        def __init__(self, *, runtime, redactor):
+        def __init__(self, *, runtime, policy, redactor):
             calls["runtime"] = runtime
             self.runtime = runtime
 
-        def execute(self, *, task_id, review_input, commands, dry_run):
-            calls["commands"] = commands
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
+            calls.setdefault("requests", []).append(request)
             payload = {
                 "findings": [{
                     "severity": "medium",
@@ -438,14 +763,17 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
                     "source": ["mock"],
                 }]
             }
+            output_files = ({
+                "out/findings.json": json.dumps(payload)
+            } if request.command_argv[1] == "scripts/run_static_review.py" else {})
             return HarnessExecutionResult(runs=[
                 SandboxRun(
-                    run_id=f"sandbox_{task_id}_1",
+                    run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
                     task_id=task_id,
                     runtime=self.runtime,
-                    command=commands[0],
+                    command=list(request.command_argv),
                     decision="allow",
-                    output_files={"out/findings.json": json.dumps(payload)},
+                    output_files=output_files,
                     created_at="1970-01-01T00:00:00+00:00",
                 )
             ])
@@ -459,7 +787,7 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
     )
 
     assert calls["runtime"] == "container"
-    assert calls["commands"]
+    assert calls["requests"]
     assert any(finding.title == "container skill finding" and "skill:run_static_review" in finding.source
                for finding in report.findings)
 
@@ -468,10 +796,10 @@ def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monke
 
     class FakeTrpcSkillToolSetHarness:
 
-        def __init__(self, *, runtime, redactor):
+        def __init__(self, *, runtime, policy, redactor):
             self.runtime = runtime
 
-        def execute(self, *, task_id, review_input, commands, dry_run):
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
             payload = {
                 "findings": [{
                     "severity": "medium",
@@ -485,14 +813,17 @@ def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monke
                     "source": "mock",
                 }]
             }
+            output_files = ({
+                "out/findings.json": json.dumps(payload)
+            } if request.command_argv[1] == "scripts/run_static_review.py" else {})
             return HarnessExecutionResult(runs=[
                 SandboxRun(
-                    run_id=f"sandbox_{task_id}_1",
+                    run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
                     task_id=task_id,
                     runtime=self.runtime,
-                    command=commands[0],
+                    command=list(request.command_argv),
                     decision="allow",
-                    output_files={"out/findings.json": json.dumps(payload)},
+                    output_files=output_files,
                     created_at="1970-01-01T00:00:00+00:00",
                 )
             ])
@@ -540,14 +871,14 @@ def test_container_runtime_optional_integration_documented(tmp_path):
     assert has_skill_source or has_artifacts
 
 
-def test_auto_runtime_prefers_container_then_records_local_fallback(tmp_path, monkeypatch):
+def test_auto_runtime_stays_container_when_container_execution_fails(tmp_path, monkeypatch):
 
     class FailingTrpcSkillToolSetHarness:
 
-        def __init__(self, *, runtime, redactor):
+        def __init__(self, *, runtime, policy, redactor):
             self.runtime = runtime
 
-        def execute(self, *, task_id, review_input, commands, dry_run):
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
             raise RuntimeError("docker unavailable")
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", FailingTrpcSkillToolSetHarness)
@@ -558,11 +889,10 @@ def test_auto_runtime_prefers_container_then_records_local_fallback(tmp_path, mo
         runtime="auto",
     )
 
-    assert report.input_summary["effective_runtime"] == "local"
-    assert any(item.decision == "needs_human_review" for item in report.filter_intercepts)
-    assert report.telemetry.filter_needs_review_count == 1
-    assert any(warning.title == "container runtime fell back to local" for warning in report.needs_human_review)
-    assert len(report.sandbox_runs) == 3
+    assert report.input_summary["effective_runtime"] == "container"
+    assert report.telemetry.filter_needs_review_count == 0
+    assert any(warning.title == "container runtime failed" for warning in report.needs_human_review)
+    assert report.sandbox_runs == []
 
 
 def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypatch):
@@ -572,41 +902,41 @@ def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypat
         policy=ReviewExecutionPolicy(dry_run=True),
         redactor=SecretRedactor(),
     )
-    command = [
-        "python3",
-        "scripts/smoke_test.py",
-        "--input",
-        "work/inputs/review_input.json",
-        "--output",
-        "out/smoke.json",
-    ]
-
-    env_result = runner.run(
-        task_id="task-safe-env",
-        review_input={
-            "task_id": "task-safe-env",
-            "fixture_names": []
-        },
-        runtime="local",
-        dry_run=True,
-        commands=[command],
-    )
+    safe_input = {"task_id": "task-safe-env", "fixture_names": []}
+    with prepare_execution_plan(task_id="task-safe-env",
+                                runtime="local",
+                                review_input=safe_input,
+                                redactor=SecretRedactor()) as plan:
+        env_result = runner.run(
+            task_id="task-safe-env",
+            review_input=safe_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[2]],
+            policy_context=plan.policy_context,
+        )
     smoke = json.loads(env_result.runs[0].output_files["out/smoke.json"])
     assert smoke["secret_token_in_env"] is False
 
     monkeypatch.setattr(sandbox_module, "MAX_STDOUT_CHARS", 24)
     monkeypatch.setattr(sandbox_module, "MAX_OUTPUT_FILE_BYTES", 96)
-    large_result = runner.run(
-        task_id="task-large-output",
-        review_input={
-            "task_id": "task-large-output",
-            "fixture_names": [],
-            "emit_large_output": 512
-        },
-        runtime="local",
-        dry_run=True,
-        commands=[command],
-    )
+    large_input = {
+        "task_id": "task-large-output",
+        "fixture_names": [],
+        "emit_large_output": 512,
+    }
+    with prepare_execution_plan(task_id="task-large-output",
+                                runtime="local",
+                                review_input=large_input,
+                                redactor=SecretRedactor()) as plan:
+        large_result = runner.run(
+            task_id="task-large-output",
+            review_input=large_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[2]],
+            policy_context=plan.policy_context,
+        )
     run = large_result.runs[0]
     assert run.stdout_truncated is True
     assert run.output_truncated is True
@@ -635,10 +965,10 @@ def test_filter_deny_before_container_execution_is_persisted(tmp_path, monkeypat
 
     class UnexpectedTrpcSkillToolSetHarness:
 
-        def __init__(self, *, runtime, redactor):
+        def __init__(self, *, runtime, policy, redactor):
             self.runtime = runtime
 
-        def execute(self, *, task_id, review_input, commands, dry_run):
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
             raise AssertionError("container harness must not run denied commands")
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", UnexpectedTrpcSkillToolSetHarness)

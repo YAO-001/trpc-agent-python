@@ -15,11 +15,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
+from typing import Callable
 
-from .filter_policy import ALLOWED_SKILL_COMMANDS
+from .execution_request import ExecutionRequest
+from .execution_request import PolicyContext
 from .filter_policy import ReviewExecutionPolicy
 from .models import FilterIntercept
 from .models import Finding
@@ -29,36 +33,24 @@ from .models import utc_now
 from .sandbox_artifact_loader import load_sandbox_artifacts
 from .secret_redactor import SecretRedactor
 
-DEFAULT_OUTPUTS = {
-    "scripts/run_static_review.py": ["out/findings.json"],
-    "scripts/secret_scan.py": ["out/secrets.json"],
-    "scripts/smoke_test.py": ["out/smoke.json"],
-}
-DEFAULT_TIMEOUTS = {
-    "scripts/run_static_review.py": 30,
-    "scripts/secret_scan.py": 30,
-    "scripts/smoke_test.py": 30,
-}
 MAX_STDOUT_CHARS = 12000
 MAX_STDERR_CHARS = 12000
 MAX_OUTPUT_FILE_BYTES = 256 * 1024
 MAX_OUTPUT_FILES = 16
-SAFE_ENV_KEYS = {
+_POSIX_LAUNCH_ENV_KEYS = frozenset({
     "PATH",
-    "Path",
-    "PYTHONPATH",
-    "HOME",
     "TMPDIR",
     "TEMP",
     "TMP",
+})
+_WINDOWS_LAUNCH_ENV_KEYS = _POSIX_LAUNCH_ENV_KEYS | frozenset({
+    "Path",
     "PATHEXT",
     "SYSTEMROOT",
     "SystemRoot",
     "WINDIR",
     "COMSPEC",
-    "PYTHONIOENCODING",
-    "PYTHONUNBUFFERED",
-}
+})
 
 
 @dataclass(frozen=True)
@@ -69,29 +61,35 @@ class HarnessExecutionResult:
 @dataclass
 class SandboxResult:
     runs: list[SandboxRun]
-    intercepts: list[FilterIntercept]
+    decisions: list[FilterIntercept]
     findings: list[Finding]
     warnings: list[ReviewWarning]
     needs_human_review: list[ReviewWarning]
     effective_runtime: str
 
 
-def _output_files_for_command(command: list[str]) -> list[str]:
-    if len(command) > 1:
-        return DEFAULT_OUTPUTS.get(command[1], ["out/*.json"])
-    return []
+def _inherited_platform_env(
+    host_env: Mapping[str, str],
+    *,
+    platform_name: str,
+) -> dict[str, str]:
+    allowed_keys = _WINDOWS_LAUNCH_ENV_KEYS if platform_name == "nt" else _POSIX_LAUNCH_ENV_KEYS
+    return {key: value for key, value in host_env.items() if key in allowed_keys}
 
 
-def _timeout_for_command(command: list[str]) -> int:
-    if len(command) > 1:
-        return DEFAULT_TIMEOUTS.get(command[1], 30)
-    return 30
-
-
-def _safe_env() -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key in SAFE_ENV_KEYS}
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    env.setdefault("PYTHONUNBUFFERED", "1")
+def _safe_env(*, workspace_root: Path, request: ExecutionRequest) -> dict[str, str]:
+    env = _inherited_platform_env(os.environ, platform_name=os.name)
+    skill_dir = workspace_root / "skills" / "code-review"
+    env.update({
+        "PYTHONIOENCODING": "utf-8",
+        "WORKSPACE_DIR": str(workspace_root),
+        "SKILLS_DIR": str(workspace_root / "skills"),
+        "WORK_DIR": str(skill_dir / "work"),
+        "OUTPUT_DIR": str(skill_dir / "out"),
+        "RUN_DIR": str(workspace_root / "runs" / request.request_id.replace(":", "_")),
+        "TRPC_AGENT_SKILL_NAME": "code-review",
+    })
+    env.update({item.name: item.value for item in request.env})
     return env
 
 
@@ -106,14 +104,14 @@ def _normalize_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _read_output_file(path: Path) -> tuple[str, bool]:
+def _read_output_file(path: Path, *, limit: int) -> tuple[str, bool]:
     raw = path.read_bytes()
-    truncated = len(raw) > MAX_OUTPUT_FILE_BYTES
+    truncated = len(raw) > limit
     if truncated:
-        raw = raw[:MAX_OUTPUT_FILE_BYTES]
+        raw = raw[:limit]
     text = raw.decode("utf-8", errors="replace")
     if truncated:
-        text += f"\n[TRUNCATED: kept first {MAX_OUTPUT_FILE_BYTES} bytes]\n"
+        text += f"\n[TRUNCATED: kept first {limit} bytes]\n"
     return text, truncated
 
 
@@ -127,15 +125,17 @@ def _sanitize_output_mapping(
     *,
     redactor: SecretRedactor,
     already_truncated: bool,
+    max_files: int,
+    max_file_bytes: int,
 ) -> tuple[dict[str, str], bool]:
     limited: dict[str, str] = {}
     output_truncated = already_truncated
     for index, (name, content) in enumerate(sorted(output_map.items())):
-        if index >= MAX_OUTPUT_FILES:
+        if index >= max_files:
             output_truncated = True
             break
         redacted = redactor.redact_text(_normalize_newlines(content)).text
-        truncated_content, was_truncated = _truncate_text(redacted, MAX_OUTPUT_FILE_BYTES)
+        truncated_content, was_truncated = _truncate_text(redacted, max_file_bytes)
         output_truncated = output_truncated or was_truncated
         limited[name] = truncated_content
     return limited, output_truncated
@@ -183,70 +183,77 @@ def _runtime_warning(title: str, message: str) -> ReviewWarning:
 
 
 class LocalSkillHarness:
-    """Explicit development fallback that stages the Skill and runs allowlisted scripts locally."""
+    """Explicit local runtime that stages and executes one validated request."""
 
     def __init__(self, *, skill_dir: Path, redactor: SecretRedactor) -> None:
         self.skill_dir = skill_dir
         self.redactor = redactor
 
-    def execute(
+    def execute_one(
         self,
         *,
         task_id: str,
         review_input: dict[str, Any],
-        commands: list[list[str]],
+        request: ExecutionRequest,
+        policy_context: PolicyContext,
         dry_run: bool,
     ) -> HarnessExecutionResult:
+        del policy_context, review_input
         with tempfile.TemporaryDirectory(prefix="skills_code_review_") as tmp:
-            workspace_skill = Path(tmp) / "code-review"
+            workspace_root = Path(tmp)
+            workspace_skill = workspace_root / "skills" / "code-review"
             ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "work", "out")
             shutil.copytree(self.skill_dir, workspace_skill, ignore=ignore)
-            (workspace_skill / "work" / "inputs").mkdir(parents=True, exist_ok=True)
             (workspace_skill / "out").mkdir(parents=True, exist_ok=True)
-            input_path = workspace_skill / "work" / "inputs" / "review_input.json"
-            input_path.write_text(
-                json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2),
-                encoding="utf-8",
+            input_spec = request.inputs[0]
+            source = Path(input_spec.src.removeprefix("host://"))
+            destination = workspace_root.joinpath(*PurePosixPath(input_spec.dst).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            run = self._run_request(
+                task_id=task_id,
+                request=request,
+                workspace_root=workspace_root,
+                cwd=workspace_skill,
+                dry_run=dry_run,
             )
-            runs = [
-                self._run_command(
-                    task_id=task_id,
-                    run_index=index,
-                    logical_command=command,
-                    output_files=_output_files_for_command(command),
-                    cwd=workspace_skill,
-                    dry_run=dry_run,
-                ) for index, command in enumerate(commands, start=1)
-            ]
-        return HarnessExecutionResult(runs=runs)
+        return HarnessExecutionResult(runs=[run])
 
-    def _collect_outputs(self, *, cwd: Path, output_files: list[str]) -> tuple[dict[str, str], bool]:
+    def _collect_outputs(
+        self,
+        *,
+        workspace_root: Path,
+        cwd: Path,
+        request: ExecutionRequest,
+    ) -> tuple[dict[str, str], bool]:
         output_map: dict[str, str] = {}
         output_truncated = False
-        for pattern in output_files:
-            matches = sorted(cwd.glob(pattern)) if "*" in pattern else [cwd / pattern]
+        max_files = min(request.output_spec.max_files, MAX_OUTPUT_FILES)
+        max_file_bytes = min(request.output_spec.max_file_bytes, MAX_OUTPUT_FILE_BYTES)
+        for pattern in request.output_spec.globs:
+            matches = sorted(workspace_root.glob(pattern)) if "*" in pattern else [workspace_root / pattern]
             for path in matches:
                 if not path.is_file():
                     continue
-                if len(output_map) >= MAX_OUTPUT_FILES:
+                if len(output_map) >= max_files:
                     output_truncated = True
                     return output_map, output_truncated
-                content, truncated = _read_output_file(path)
+                content, truncated = _read_output_file(path, limit=max_file_bytes)
                 output_truncated = output_truncated or truncated
                 output_map[path.relative_to(cwd).as_posix()] = content
         return output_map, output_truncated
 
-    def _run_command(
+    def _run_request(
         self,
         *,
         task_id: str,
-        run_index: int,
-        logical_command: list[str],
-        output_files: list[str],
+        request: ExecutionRequest,
+        workspace_root: Path,
         cwd: Path,
         dry_run: bool,
     ) -> SandboxRun:
         started = time.perf_counter()
+        logical_command = list(request.command_argv)
         try:
             result = subprocess.run(
                 [sys.executable, *logical_command[1:]],
@@ -254,8 +261,8 @@ class LocalSkillHarness:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=_timeout_for_command(logical_command),
-                env=_safe_env(),
+                timeout=request.timeout_seconds,
+                env=_safe_env(workspace_root=workspace_root, request=request),
             )
             timed_out = False
             exit_code = result.returncode
@@ -266,16 +273,22 @@ class LocalSkillHarness:
             exit_code = -1
             stdout = exc.stdout or ""
             stderr = exc.stderr or "command timed out"
-        output_map, file_truncated = self._collect_outputs(cwd=cwd, output_files=output_files)
+        output_map, file_truncated = self._collect_outputs(
+            workspace_root=workspace_root,
+            cwd=cwd,
+            request=request,
+        )
         output_map, output_truncated = _sanitize_output_mapping(
             output_map,
             redactor=self.redactor,
             already_truncated=file_truncated,
+            max_files=min(request.output_spec.max_files, MAX_OUTPUT_FILES),
+            max_file_bytes=min(request.output_spec.max_file_bytes, MAX_OUTPUT_FILE_BYTES),
         )
         stdout, stdout_truncated = _sanitize_stream(stdout, redactor=self.redactor, limit=MAX_STDOUT_CHARS)
         stderr, stderr_truncated = _sanitize_stream(stderr, redactor=self.redactor, limit=MAX_STDERR_CHARS)
         return SandboxRun(
-            run_id=f"sandbox_{task_id}_{run_index}",
+            run_id="sandbox_" + request.request_id.replace(":", "_"),
             task_id=task_id,
             runtime="local",
             command=logical_command,
@@ -295,29 +308,37 @@ class LocalSkillHarness:
 
 
 class TrpcSkillToolSetHarness:
-    """Container SkillToolSet execution path used outside the explicit local fallback."""
+    """Container SkillToolSet execution path for one validated request."""
 
-    def __init__(self, *, runtime: str, redactor: SecretRedactor) -> None:
+    def __init__(self, *, runtime: str, policy: ReviewExecutionPolicy, redactor: SecretRedactor) -> None:
         self.runtime = runtime
+        self.policy = policy
         self.redactor = redactor
 
-    def execute(
+    def execute_one(
         self,
         *,
         task_id: str,
         review_input: dict[str, Any],
-        commands: list[list[str]],
+        request: ExecutionRequest,
+        policy_context: PolicyContext,
         dry_run: bool,
     ) -> HarnessExecutionResult:
+        del review_input
         return asyncio.run(
-            self._execute_async(task_id=task_id, review_input=review_input, commands=commands, dry_run=dry_run))
+            self._execute_one_async(
+                task_id=task_id,
+                request=request,
+                policy_context=policy_context,
+                dry_run=dry_run,
+            ))
 
-    async def _execute_async(
+    async def _execute_one_async(
         self,
         *,
         task_id: str,
-        review_input: dict[str, Any],
-        commands: list[list[str]],
+        request: ExecutionRequest,
+        policy_context: PolicyContext,
         dry_run: bool,
     ) -> HarnessExecutionResult:
         from trpc_agent_sdk.abc import AgentABC
@@ -327,12 +348,17 @@ class TrpcSkillToolSetHarness:
         from trpc_agent_sdk.context import set_invocation_ctx
         from trpc_agent_sdk.sessions import InMemorySessionService
 
-        from .agent_factory import build_skill_run_calls
         from .agent_factory import create_skill_tool_set
-        from .agent_factory import review_before_tool_callback
+        from .agent_factory import make_review_before_tool_callback
+
+        before_callback = make_review_before_tool_callback(
+            self.policy,
+            policy_context,
+            {request.command_argv: request},
+        )
 
         class SkillHarnessAgent(AgentABC):
-            before_tool_callback: Any = review_before_tool_callback
+            before_tool_callback: Any = None
             after_tool_callback: Any = None
 
             def get_subagents(self) -> list[AgentABC]:
@@ -342,55 +368,52 @@ class TrpcSkillToolSetHarness:
                 if False:
                     yield parent_context
 
-        with tempfile.TemporaryDirectory(prefix="skills_code_review_input_") as tmp:
-            input_path = Path(tmp) / "review_input.json"
-            input_path.write_text(
-                json.dumps(review_input, ensure_ascii=False, sort_keys=True, indent=2),
-                encoding="utf-8",
-            )
-            tool_set = create_skill_tool_set(runtime=self.runtime)
-            calls_by_command = {call["command"]: call for call in build_skill_run_calls(str(input_path))}
-            service = InMemorySessionService()
-            session = await service.create_session(
-                app_name="skills_code_review_agent",
-                user_id="dry-run",
-                session_id=task_id,
-            )
-            ctx = InvocationContext(
-                session_service=service,
-                invocation_id=f"invocation-{task_id}",
-                agent=SkillHarnessAgent(name="code_review_skill_harness"),
-                agent_context=create_agent_context(),
-                session=session,
-            )
-            token = set_invocation_ctx(ctx)
-            try:
-                tools = await tool_set.get_tools(ctx)
-                run_tool = next(tool for tool in tools if getattr(tool, "name", "") == "skill_run")
-                runs: list[SandboxRun] = []
-                for index, command in enumerate(commands, start=1):
-                    call = calls_by_command.get(" ".join(command))
-                    if not call:
-                        continue
-                    output = await run_tool.run_async(tool_context=ctx, args=call)
-                    runs.append(self._run_from_skill_output(task_id, index, command, output, dry_run=dry_run))
-            finally:
-                reset_invocation_ctx(token)
-        return HarnessExecutionResult(runs=runs)
+        tool_set = create_skill_tool_set(runtime=self.runtime)
+        service = InMemorySessionService()
+        session = await service.create_session(
+            app_name="skills_code_review_agent",
+            user_id="dry-run",
+            session_id=request.request_id.replace(":", "-"),
+        )
+        ctx = InvocationContext(
+            session_service=service,
+            invocation_id=f"invocation-{request.request_id}",
+            agent=SkillHarnessAgent(
+                name="code_review_skill_harness",
+                before_tool_callback=before_callback,
+            ),
+            agent_context=create_agent_context(),
+            session=session,
+        )
+        token = set_invocation_ctx(ctx)
+        try:
+            tools = await tool_set.get_tools(ctx)
+            run_tool = next(tool for tool in tools if getattr(tool, "name", "") == "skill_run")
+            output = await run_tool.run_async(tool_context=ctx, args=request.to_skill_run_args())
+            if not isinstance(output, Mapping):
+                raise RuntimeError("SDK integrity failure: skill_run returned a non-mapping response")
+            output_data = dict(output)
+            if output_data.get("blocked"):
+                raise RuntimeError("SDK integrity guard blocked skill_run before execution")
+            run = self._run_from_skill_output(task_id, request, output_data, dry_run=dry_run)
+        finally:
+            reset_invocation_ctx(token)
+        return HarnessExecutionResult(runs=[run])
 
     def _run_from_skill_output(
         self,
         task_id: str,
-        run_index: int,
-        command: list[str],
+        request: ExecutionRequest,
         output: dict[str, Any],
         *,
         dry_run: bool,
     ) -> SandboxRun:
         output_map: dict[str, str] = {}
         output_truncated = False
+        max_files = min(request.output_spec.max_files, MAX_OUTPUT_FILES)
+        max_file_bytes = min(request.output_spec.max_file_bytes, MAX_OUTPUT_FILE_BYTES)
         for item in output.get("output_files", []) or []:
-            if len(output_map) >= MAX_OUTPUT_FILES:
+            if len(output_map) >= max_files:
                 output_truncated = True
                 break
             name = str(item.get("name") or "")
@@ -402,6 +425,8 @@ class TrpcSkillToolSetHarness:
             output_map,
             redactor=self.redactor,
             already_truncated=output_truncated,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
         )
         stdout, stdout_truncated = _sanitize_stream(
             str(output.get("stdout") or ""),
@@ -415,10 +440,10 @@ class TrpcSkillToolSetHarness:
         )
         warning = "; ".join(str(item) for item in output.get("warnings", []) or [])
         return SandboxRun(
-            run_id=f"sandbox_{task_id}_{run_index}",
+            run_id="sandbox_" + request.request_id.replace(":", "_"),
             task_id=task_id,
             runtime=self.runtime,
-            command=command,
+            command=list(request.command_argv),
             decision="allow",
             exit_code=int(output.get("exit_code") or 0),
             timed_out=bool(output.get("timed_out")),
@@ -449,68 +474,65 @@ class SandboxRunner:
         review_input: dict,
         runtime: str,
         dry_run: bool,
-        commands: list[list[str]] | None = None,
+        requests: list[ExecutionRequest],
+        policy_context: PolicyContext,
+        on_decision: Callable[[FilterIntercept], None] | None = None,
+        on_run: Callable[[SandboxRun], None] | None = None,
     ) -> SandboxResult:
         if runtime not in {"local", "container", "auto"}:
             raise ValueError(f"unsupported runtime {runtime!r}")
         effective_runtime = "container" if runtime == "auto" else runtime
-        logical_commands = commands or [list(command) for command in ALLOWED_SKILL_COMMANDS]
-        intercepts: list[FilterIntercept] = []
-        allowed_commands: list[list[str]] = []
-        for command in logical_commands:
-            output_files = _output_files_for_command(command)
-            decision = self.policy.evaluate(
-                command=command,
-                runtime=effective_runtime,
-                output_files=output_files,
-                timeout=_timeout_for_command(command),
-            )
-            intercept = decision.intercept.model_copy(update={"task_id": task_id})
-            if decision.decision in {"deny", "needs_human_review"}:
-                intercepts.append(intercept)
-                continue
-            allowed_commands.append(command)
-        if not allowed_commands:
-            return SandboxResult([], intercepts, [], [], [], effective_runtime)
+        if task_id != policy_context.task_id:
+            raise ValueError("task_id does not match policy context")
+        if effective_runtime != policy_context.runtime:
+            raise ValueError("runtime does not match policy context")
+
+        decisions: list[FilterIntercept] = []
+        allowed_requests: list[ExecutionRequest] = []
+        for request in requests:
+            result = self.policy.evaluate(request, policy_context)
+            decisions.append(result.intercept)
+            if on_decision is not None:
+                on_decision(result.intercept)
+            if result.decision == "allow":
+                allowed_requests.append(request)
+        if not allowed_requests:
+            return SandboxResult([], decisions, [], [], [], effective_runtime)
 
         warnings: list[ReviewWarning] = []
         needs_human_review: list[ReviewWarning] = []
         runs: list[SandboxRun] = []
         try:
-            runs = self._execute_harness(
-                task_id=task_id,
-                review_input=review_input,
-                runtime=effective_runtime,
-                commands=allowed_commands,
-                dry_run=dry_run,
-            ).runs
+            harness = self._harness_for_runtime(runtime=effective_runtime)
         except Exception as exc:  # pylint: disable=broad-except
-            if runtime == "auto":
-                intercepts.append(
-                    self.policy.runtime_fallback(
+            needs_human_review.append(
+                _runtime_warning(
+                    f"{effective_runtime} runtime failed",
+                    f"SkillToolSet harness could not be selected: {exc}",
+                ))
+            harness = None
+
+        if harness is not None:
+            for request in sorted(allowed_requests, key=lambda item: item.request_id):
+                try:
+                    execution = harness.execute_one(
                         task_id=task_id,
-                        from_runtime="container",
-                        to_runtime="local",
-                    ))
-                needs_human_review.append(
-                    _runtime_warning(
-                        "container runtime fell back to local",
-                        f"Container SkillToolSet execution failed and auto runtime used local fallback: {exc}",
-                    ))
-                effective_runtime = "local"
-                runs = self._execute_harness(
-                    task_id=task_id,
-                    review_input=review_input,
-                    runtime=effective_runtime,
-                    commands=allowed_commands,
-                    dry_run=dry_run,
-                ).runs
-            else:
-                needs_human_review.append(
-                    _runtime_warning(
-                        f"{effective_runtime} runtime failed",
-                        f"SkillToolSet execution did not complete: {exc}",
-                    ))
+                        review_input=review_input,
+                        request=request,
+                        policy_context=policy_context,
+                        dry_run=dry_run,
+                    )
+                except Exception as exc:  # pylint: disable=broad-except
+                    needs_human_review.append(
+                        _runtime_warning(
+                            f"{effective_runtime} runtime failed",
+                            f"SkillToolSet execution did not complete: {exc}",
+                        ))
+                    continue
+                for run in execution.runs:
+                    runs.append(run)
+                    if on_run is not None:
+                        on_run(run)
 
         artifacts = load_sandbox_artifacts(runs, redactor=self.redactor)
         for run in runs:
@@ -520,32 +542,14 @@ class SandboxRunner:
         needs_human_review.extend(artifacts.needs_human_review)
         return SandboxResult(
             runs=runs,
-            intercepts=intercepts,
+            decisions=decisions,
             findings=artifacts.findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
             effective_runtime=effective_runtime,
         )
 
-    def _execute_harness(
-        self,
-        *,
-        task_id: str,
-        review_input: dict,
-        runtime: str,
-        commands: list[list[str]],
-        dry_run: bool,
-    ) -> HarnessExecutionResult:
+    def _harness_for_runtime(self, *, runtime: str):
         if runtime == "local":
-            return LocalSkillHarness(skill_dir=self.skill_dir, redactor=self.redactor).execute(
-                task_id=task_id,
-                review_input=review_input,
-                commands=commands,
-                dry_run=dry_run,
-            )
-        return TrpcSkillToolSetHarness(runtime=runtime, redactor=self.redactor).execute(
-            task_id=task_id,
-            review_input=review_input,
-            commands=commands,
-            dry_run=dry_run,
-        )
+            return LocalSkillHarness(skill_dir=self.skill_dir, redactor=self.redactor)
+        return TrpcSkillToolSetHarness(runtime=runtime, policy=self.policy, redactor=self.redactor)

@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .agent_factory import prepare_execution_plan
 from .dedupe import dedupe_findings
 from .dedupe import dedupe_warnings
 from .diff_parser import parse_unified_diff
@@ -117,7 +118,20 @@ class ReviewOrchestrator:
             "added_lines": [line.model_dump(mode="json") for line in parsed.added_lines],
             "redaction_summary": redaction.summary.model_dump(mode="json"),
         }
-        sandbox_result = sandbox.run(task_id=task_id, review_input=review_input, runtime=runtime, dry_run=dry_run)
+        with prepare_execution_plan(
+                task_id=task_id,
+                runtime=runtime,
+                review_input=review_input,
+                redactor=redactor,
+        ) as plan:
+            sandbox_result = sandbox.run(
+                task_id=task_id,
+                review_input=review_input,
+                runtime=runtime,
+                dry_run=dry_run,
+                requests=list(plan.requests),
+                policy_context=plan.policy_context,
+            )
 
         merged_findings = dedupe_findings([*rule_result.findings, *sandbox_result.findings])
         warnings = sorted(dedupe_warnings([*rule_result.warnings, *sandbox_result.warnings]), key=_warning_sort_key)
@@ -131,7 +145,7 @@ class ReviewOrchestrator:
             findings=merged_findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
-            filter_intercepts=sandbox_result.intercepts,
+            filter_intercepts=sandbox_result.decisions,
             sandbox_runs=sandbox_result.runs,
             redaction_summary=redaction.summary,
             debug_dropped_count=rule_result.debug_dropped_count,
@@ -155,7 +169,7 @@ class ReviewOrchestrator:
         )
         storage.save_sandbox_runs(sandbox_result.runs)
         storage.save_findings(task_id, merged_findings)
-        storage.save_filter_intercepts(sandbox_result.intercepts)
+        storage.save_filter_intercepts(sandbox_result.decisions)
         storage.save_telemetry(telemetry)
 
         builder = ReportBuilder(self.output_dir, self.db_url)
@@ -164,7 +178,7 @@ class ReviewOrchestrator:
             findings=merged_findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
-            filter_intercepts=sandbox_result.intercepts,
+            filter_intercepts=sandbox_result.decisions,
             sandbox_runs=sandbox_result.runs,
             telemetry=telemetry,
             redaction_summary=redaction.summary,
@@ -212,18 +226,30 @@ class ReviewOrchestrator:
             policy=ReviewExecutionPolicy(dry_run=dry_run),
             redactor=redactor,
         )
-        sandbox_result = sandbox.run(
-            task_id=task_id,
-            review_input={
-                "task_id": task_id,
-                "fixture_names": [],
-                "changed_files": [],
-                "added_lines": []
-            },
-            runtime=runtime,
-            dry_run=dry_run,
-            commands=[["rm", "-rf", "/"]],
-        )
+        review_input = {
+            "task_id": task_id,
+            "fixture_names": [],
+            "changed_files": [],
+            "added_lines": [],
+        }
+        with prepare_execution_plan(
+                task_id=task_id,
+                runtime=runtime,
+                review_input=review_input,
+                redactor=redactor,
+        ) as plan:
+            denied_request = plan.requests[0].model_copy(update={
+                "request_id": f"{task_id}:demo-filter",
+                "command_argv": ("rm", "-rf", "/"),
+            })
+            sandbox_result = sandbox.run(
+                task_id=task_id,
+                review_input=review_input,
+                runtime=runtime,
+                dry_run=dry_run,
+                requests=[denied_request],
+                policy_context=plan.policy_context,
+            )
         warnings = sorted(dedupe_warnings(sandbox_result.warnings), key=_warning_sort_key)
         needs_human_review = sorted(dedupe_warnings(sandbox_result.needs_human_review), key=_warning_sort_key)
         telemetry = build_telemetry(
@@ -232,7 +258,7 @@ class ReviewOrchestrator:
             findings=[],
             warnings=warnings,
             needs_human_review=needs_human_review,
-            filter_intercepts=sandbox_result.intercepts,
+            filter_intercepts=sandbox_result.decisions,
             sandbox_runs=sandbox_result.runs,
             redaction_summary=redaction.summary,
             debug_dropped_count=0,
@@ -255,7 +281,7 @@ class ReviewOrchestrator:
             },
         )
         storage.save_sandbox_runs(sandbox_result.runs)
-        storage.save_filter_intercepts(sandbox_result.intercepts)
+        storage.save_filter_intercepts(sandbox_result.decisions)
         storage.save_telemetry(telemetry)
 
         builder = ReportBuilder(self.output_dir, self.db_url)
@@ -264,7 +290,7 @@ class ReviewOrchestrator:
             findings=[],
             warnings=warnings,
             needs_human_review=needs_human_review,
-            filter_intercepts=sandbox_result.intercepts,
+            filter_intercepts=sandbox_result.decisions,
             sandbox_runs=sandbox_result.runs,
             telemetry=telemetry,
             redaction_summary=redaction.summary,
