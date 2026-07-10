@@ -7,12 +7,51 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from .execution_request import ExecutionPlan
+from .execution_request import ExecutionRequest
+from .execution_request import PolicyContext
 from .filter_policy import ReviewExecutionPolicy
+from .secret_redactor import SecretRedactor
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
+_SENSITIVE_INPUT_FIELDS = frozenset({"password", "token", "api_key", "secret"})
+
+
+def _redact_json_value(
+    value: Any,
+    *,
+    redactor: SecretRedactor,
+    field_name: str | None = None,
+) -> Any:
+    if isinstance(value, str):
+        safe_value = redactor.redact_text(value).text
+        if field_name is not None and field_name.casefold() in _SENSITIVE_INPUT_FIELDS:
+            prefix = f"{field_name}="
+            contextual = redactor.redact_text(f"{prefix}{safe_value}").text
+            if contextual.startswith(prefix):
+                safe_value = contextual[len(prefix):]
+        return safe_value
+    if isinstance(value, dict):
+        return {
+            key: _redact_json_value(
+                item,
+                redactor=redactor,
+                field_name=key if isinstance(key, str) else None,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_json_value(item, redactor=redactor, field_name=field_name) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_json_value(item, redactor=redactor, field_name=field_name) for item in value)
+    return value
 
 
 def create_skill_tool_set(runtime: str = "container"):
@@ -32,23 +71,31 @@ def create_skill_tool_set(runtime: str = "container"):
     return SkillToolSet(
         repository=repository,
         allowed_cmds=["python3"],
-        run_tool_kwargs={
-            "timeout": 60,
-            "save_as_artifacts": False,
-            "omit_inline_content": False
-        },
         skill_stager=CopySkillStager() if runtime == "container" else None,
     )
 
 
-def _input_specs(input_path: str | None, *, workspace_path: str) -> list[dict[str, str]]:
+def _input_specs(input_path: str | None, *, workspace_path: str) -> list[dict[str, Any]]:
     if not input_path:
         return []
     return [{
         "src": f"host://{Path(input_path).resolve().as_posix()}",
         "dst": f"{workspace_path}/work/inputs/review_input.json",
         "mode": "copy",
+        "pin": False,
     }]
+
+
+def _output_spec(path: str) -> dict[str, Any]:
+    return {
+        "globs": [path],
+        "max_files": 1,
+        "max_file_bytes": 256 * 1024,
+        "max_total_bytes": 256 * 1024,
+        "save": False,
+        "inline": True,
+        "name_template": "",
+    }
 
 
 def build_skill_run_calls(
@@ -62,33 +109,112 @@ def build_skill_run_calls(
         {
             "skill":
             "code-review",
-            "cwd":
-            cwd,
             "command": ("python3 scripts/run_static_review.py --input work/inputs/review_input.json "
                         "--output out/findings.json"),
-            "output_files": [f"{workspace_path}/out/findings.json"],
-            "inputs":
-            inputs,
+            "cwd":
+            cwd,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            },
+            "stdin":
+            "",
+            "editor_text":
+            "",
+            "output_files": [],
             "timeout":
             30,
+            "save_as_artifacts":
+            False,
+            "omit_inline_content":
+            False,
+            "artifact_prefix":
+            "",
+            "inputs":
+            inputs,
+            "outputs":
+            _output_spec(f"{workspace_path}/out/findings.json"),
+            "network_access":
+            False,
         },
         {
             "skill": "code-review",
-            "cwd": cwd,
             "command": "python3 scripts/secret_scan.py --input work/inputs/review_input.json --output out/secrets.json",
-            "output_files": [f"{workspace_path}/out/secrets.json"],
-            "inputs": inputs,
+            "cwd": cwd,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            },
+            "stdin": "",
+            "editor_text": "",
+            "output_files": [],
             "timeout": 30,
+            "save_as_artifacts": False,
+            "omit_inline_content": False,
+            "artifact_prefix": "",
+            "inputs": inputs,
+            "outputs": _output_spec(f"{workspace_path}/out/secrets.json"),
+            "network_access": False,
         },
         {
             "skill": "code-review",
-            "cwd": cwd,
             "command": "python3 scripts/smoke_test.py --input work/inputs/review_input.json --output out/smoke.json",
-            "output_files": [f"{workspace_path}/out/smoke.json"],
-            "inputs": inputs,
+            "cwd": cwd,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            },
+            "stdin": "",
+            "editor_text": "",
+            "output_files": [],
             "timeout": 30,
+            "save_as_artifacts": False,
+            "omit_inline_content": False,
+            "artifact_prefix": "",
+            "inputs": inputs,
+            "outputs": _output_spec(f"{workspace_path}/out/smoke.json"),
+            "network_access": False,
         },
     ]
+
+
+def build_execution_requests(
+    task_id: str,
+    runtime: str,
+    input_path: str,
+) -> tuple[ExecutionRequest, ...]:
+    return tuple(
+        ExecutionRequest.from_skill_run_args(
+            request_id=f"{task_id}:skill-run:{index}",
+            task_id=task_id,
+            runtime=runtime,
+            args=args,
+        ) for index, args in enumerate(build_skill_run_calls(input_path), start=1))
+
+
+@contextmanager
+def prepare_execution_plan(
+    *,
+    task_id: str,
+    runtime: str,
+    review_input: dict[str, Any],
+    redactor: SecretRedactor,
+) -> Iterator[ExecutionPlan]:
+    normalized_runtime = "container" if runtime == "auto" else runtime
+    with tempfile.TemporaryDirectory(prefix="skills_code_review_input_") as tmp:
+        input_path = Path(tmp) / "review_input.json"
+        safe_review_input = _redact_json_value(review_input, redactor=redactor)
+        serialized = json.dumps(safe_review_input, ensure_ascii=False, sort_keys=True)
+        cleaned = json.loads(serialized)
+        input_path.write_text(
+            json.dumps(cleaned, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        requests = build_execution_requests(task_id, normalized_runtime, str(input_path))
+        input_uri = f"host://{input_path.resolve().as_posix()}"
+        policy_context = PolicyContext(
+            task_id=task_id,
+            runtime=normalized_runtime,
+            allowed_input_sources=frozenset({input_uri}),
+        )
+        yield ExecutionPlan(requests=requests, policy_context=policy_context)
 
 
 def review_before_tool_callback(context, tool, args: dict, response=None):  # pylint: disable=unused-argument
