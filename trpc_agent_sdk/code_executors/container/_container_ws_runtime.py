@@ -17,6 +17,7 @@ Container workspace runtime implementation for Docker-based code execution.
 import io
 import json
 import os
+import posixpath
 import tarfile
 import time
 from dataclasses import dataclass
@@ -94,6 +95,27 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def _container_path(*parts: str) -> str:
+    """Join paths that are interpreted inside the Linux container."""
+    normalized = []
+    for part in parts:
+        value = str(part).strip().replace("\\", "/")
+        if value:
+            normalized.append(value)
+    if not normalized:
+        return ""
+    head, *tail = normalized
+    return posixpath.normpath(posixpath.join(head, *(part.strip("/") for part in tail if part.strip("/"))))
+
+
+def _container_parent(path: str) -> str:
+    return posixpath.dirname(str(path).replace("\\", "/").rstrip("/")) or "."
+
+
+def _container_name(path: str) -> str:
+    return posixpath.basename(str(path).replace("\\", "/").rstrip("/"))
+
+
 class ContainerWorkspaceManager(BaseWorkspaceManager):
     """
     Docker container-based workspace manager implementation.
@@ -133,17 +155,17 @@ class ContainerWorkspaceManager(BaseWorkspaceManager):
         safe_id = self._sanitize(exec_id)
         suffix = time.time_ns()
 
-        ws_path = str(Path(self.config.run_container_base) / f"ws_{safe_id}_{suffix}")
+        ws_path = _container_path(self.config.run_container_base, f"ws_{safe_id}_{suffix}")
 
         # Create standard directory layout
         cmd_str = ("set -e; "
                    f"mkdir -p {_shell_quote(ws_path)} "
-                   f"{_shell_quote(str(Path(ws_path) / DIR_SKILLS))} "
-                   f"{_shell_quote(str(Path(ws_path) / DIR_WORK))} "
-                   f"{_shell_quote(str(Path(ws_path) / DIR_RUNS))} "
-                   f"{_shell_quote(str(Path(ws_path) / DIR_OUT))}; "
-                   f"[ -f {_shell_quote(str(Path(ws_path) / META_FILE_NAME))} ] || "
-                   f"echo '{{}}' > {_shell_quote(str(Path(ws_path) / META_FILE_NAME))}")
+                   f"{_shell_quote(_container_path(ws_path, DIR_SKILLS))} "
+                   f"{_shell_quote(_container_path(ws_path, DIR_WORK))} "
+                   f"{_shell_quote(_container_path(ws_path, DIR_RUNS))} "
+                   f"{_shell_quote(_container_path(ws_path, DIR_OUT))}; "
+                   f"[ -f {_shell_quote(_container_path(ws_path, META_FILE_NAME))} ] || "
+                   f"echo '{{}}' > {_shell_quote(_container_path(ws_path, META_FILE_NAME))}")
         cmd = ["/bin/bash", "-lc", cmd_str]
 
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
@@ -157,7 +179,7 @@ class ContainerWorkspaceManager(BaseWorkspaceManager):
             logger.info("Auto-mapping inputs for workspace %s", exec_id)
             specs = [
                 WorkspaceInputSpec(src=f"host://{self.config.inputs_host_base}",
-                                   dst=str(Path("work") / "inputs"),
+                                   dst=_container_path("work", "inputs"),
                                    mode="link")
             ]
             await self.fs.stage_inputs(ws, specs, ctx)
@@ -178,7 +200,7 @@ class ContainerWorkspaceManager(BaseWorkspaceManager):
         if not ws or not ws.path:
             return
 
-        cmd = ["/bin/bash", "-lc", f"rm -rf '{ws.path}'"]
+        cmd = ["/bin/bash", "-lc", f"rm -rf {_shell_quote(ws.path)}"]
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
         if result.exit_code != 0:
             raise RuntimeError(f"Failed to clean up workspace: {result.stderr}")
@@ -270,15 +292,16 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
             RuntimeError: If staging fails
         """
         src_abs_path = os.path.abspath(src)
-        container_dst = str(Path(ws.path) / dst) if dst else ws.path
+        container_dst = _container_path(ws.path, dst) if dst else ws.path
         # Fast path: within skills mount
         if opt.allow_mount and self.config.skills_host_base:
             rel_path = get_rel_path(self.config.skills_host_base, src_abs_path)
             if rel_path:
-                container_src = str(Path(self.config.skills_container_base) / rel_path)
-                cmd_str = f"mkdir -p '{container_dst}' && cp -a '{container_src}/.' '{container_dst}'"
+                container_src = _container_path(self.config.skills_container_base, rel_path)
+                cmd_str = (f"mkdir -p {_shell_quote(container_dst)} && "
+                           f"cp -a {_shell_quote(container_src + '/.')} {_shell_quote(container_dst)}")
                 if opt.read_only:
-                    cmd_str += f" && chmod -R a-w '{container_dst}'"
+                    cmd_str += f" && chmod -R a-w {_shell_quote(container_dst)}"
 
                 cmd = ["/bin/bash", "-lc", cmd_str]
                 result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
@@ -290,7 +313,7 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         await self._put_directory(ws, src_abs_path, dst)
 
         if opt.read_only:
-            cmd = ["/bin/bash", "-lc", f"chmod -R a-w '{container_dst}'"]
+            cmd = ["/bin/bash", "-lc", f"chmod -R a-w {_shell_quote(container_dst)}"]
             result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
             if result.exit_code != 0:
                 raise RuntimeError(f"Failed to chmod directory: {result.stderr}")
@@ -343,8 +366,8 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         md = await self._load_workspace_metadata(ws)
         for spec in specs:
             mode = (spec.mode or "").lower().strip() or "copy"
-            dst_rel = (spec.dst or "").strip() or str(Path(DIR_WORK) / "inputs" / self._input_base(spec.src))
-            dst_abs = str(Path(ws.path) / dst_rel)
+            dst_rel = (spec.dst or "").strip() or _container_path(DIR_WORK, "inputs", self._input_base(spec.src))
+            dst_abs = _container_path(ws.path, dst_rel)
 
             resolved = ""
             version: Optional[int] = None
@@ -367,12 +390,12 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
                 resolved = host_path
             elif spec.src.startswith("workspace://"):
                 rel = spec.src.removeprefix("workspace://")
-                src = str(Path(ws.path) / rel)
+                src = _container_path(ws.path, rel)
                 await self._stage_workspace_input(src, dst_abs, mode)
                 resolved = rel
             elif spec.src.startswith("skill://"):
                 rest = spec.src.removeprefix("skill://")
-                src = str(Path(ws.path) / DIR_SKILLS / rest)
+                src = _container_path(ws.path, DIR_SKILLS, rest)
                 await self._stage_workspace_input(src, dst_abs, mode)
                 resolved = src
             else:
@@ -495,19 +518,28 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         if not src or not str(src).strip():
             raise ValueError("source path is empty")
         abs_src = os.path.abspath(src)
-        container_dst = str(Path(ws.path) / dst) if dst else ws.path
+        container_dst = _container_path(ws.path, dst) if dst else ws.path
         if self.config.skills_host_base:
             rel_path = get_rel_path(self.config.skills_host_base, abs_src)
             if rel_path:
-                container_src = str(Path(self.config.skills_container_base) / rel_path)
+                container_src = _container_path(self.config.skills_container_base, rel_path)
                 # Create destination directory
-                cmd = ["/bin/bash", "-lc", f"mkdir -p '{container_dst}' && cp -a '{container_src}/.' '{container_dst}'"]
+                cmd = [
+                    "/bin/bash",
+                    "-lc",
+                    (f"mkdir -p {_shell_quote(container_dst)} && "
+                     f"cp -a {_shell_quote(container_src + '/.')} {_shell_quote(container_dst)}"),
+                ]
                 result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
                 if result.exit_code == 0:
                     return None
                 logger.debug("Failed to stage directory via mount copy, fallback to tar: %s", result.stderr)
 
-        cmd = ["/bin/bash", "-lc", f"[ -e '{container_dst}' ] || mkdir -p '{container_dst}'"]
+        cmd = [
+            "/bin/bash",
+            "-lc",
+            f"[ -e {_shell_quote(container_dst)} ] || mkdir -p {_shell_quote(container_dst)}",
+        ]
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
         if result.exit_code:
             raise RuntimeError(f"Failed to stage directory: {result.stderr}")
@@ -525,7 +557,7 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
     async def _put_bytes_tar(self, data: bytes, dest: str, mode: int = 0o644) -> None:
         """Copy bytes to container using tar."""
         # Create a tar with single file named as dest's base
-        base = Path(dest).name
+        base = _container_name(dest)
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w') as tar:
             tarinfo = tarfile.TarInfo(name=base)
@@ -538,12 +570,12 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         # Ensure parent directory exists. Parent can be a symlink (for example
         # work/inputs in container mode when auto_inputs is enabled), so avoid
         # running plain `mkdir -p <symlink>` which may return "File exists".
-        parent = Path(dest).parent
-        cmd = ["/bin/bash", "-lc", f"[ -e '{parent.as_posix()}' ] || mkdir -p '{parent.as_posix()}'"]
+        parent = _container_parent(dest)
+        cmd = ["/bin/bash", "-lc", f"[ -e {_shell_quote(parent)} ] || mkdir -p {_shell_quote(parent)}"]
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
         if result.exit_code:
             raise RuntimeError(f"Failed to stage directory: {result.stderr}")
-        success = self.container.client.api.put_archive(self.container.container.id, parent.as_posix(), tar_buffer)
+        success = self.container.client.api.put_archive(self.container.container.id, parent, tar_buffer)
         if not success:
             raise RuntimeError(f"Failed to copy bytes to {dest}")
 
@@ -552,16 +584,16 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         if self.config.inputs_host_base:
             rel_path = get_rel_path(self.config.inputs_host_base, host)
             if rel_path:
-                container_src = str(Path(self.config.inputs_container_base) / rel_path)
+                container_src = _container_path(self.config.inputs_container_base, rel_path)
 
                 if mode == "link":
-                    cmd_str = (f"parent='{Path(dst).parent}'; "
+                    cmd_str = (f"parent={_shell_quote(_container_parent(dst))}; "
                                f"[ -e \"$parent\" ] || mkdir -p \"$parent\"; "
-                               f"ln -sfn '{container_src}' '{dst}'")
+                               f"ln -sfn {_shell_quote(container_src)} {_shell_quote(dst)}")
                 else:
-                    cmd_str = (f"parent='{Path(dst).parent}'; "
+                    cmd_str = (f"parent={_shell_quote(_container_parent(dst))}; "
                                f"[ -e \"$parent\" ] || mkdir -p \"$parent\"; "
-                               f"cp -a '{container_src}' '{dst}'")
+                               f"cp -a {_shell_quote(container_src)} {_shell_quote(dst)}")
 
                 cmd = ["/bin/bash", "-lc", cmd_str]
                 result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
@@ -569,17 +601,21 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
                     raise RuntimeError(f"Failed to stage host input: {result.stderr}")
                 return
         # Fallback to tar copy
-        await self._put_directory(ws, host, str(Path(dst_rel).parent))
+        host_path = Path(host)
+        if host_path.is_file():
+            await self._put_bytes_tar(host_path.read_bytes(), dst)
+            return
+        await self._put_directory(ws, host, dst_rel)
 
     async def _stage_workspace_input(self, src: str, dst: str, mode: str) -> None:
         """Stage input from workspace path."""
-        parent = Path(dst).parent
+        parent = _container_parent(dst)
         if mode == "link":
-            cmd_str = (f"[ -e '{parent}' ] || mkdir -p '{parent}'; "
-                       f"ln -sfn '{src}' '{dst}'")
+            cmd_str = (f"[ -e {_shell_quote(parent)} ] || mkdir -p {_shell_quote(parent)}; "
+                       f"ln -sfn {_shell_quote(src)} {_shell_quote(dst)}")
         else:
-            cmd_str = (f"[ -e '{parent}' ] || mkdir -p '{parent}'; "
-                       f"cp -a '{src}' '{dst}'")
+            cmd_str = (f"[ -e {_shell_quote(parent)} ] || mkdir -p {_shell_quote(parent)}; "
+                       f"cp -a {_shell_quote(src)} {_shell_quote(dst)}")
 
         cmd = ["/bin/bash", "-lc", cmd_str]
         # await _exec_cmd(self.container, cmd, self.config.command_args)
@@ -678,7 +714,7 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
 
     async def _load_workspace_metadata(self, ws: WorkspaceInfo):
         now = datetime.now()
-        cmd = ["/bin/bash", "-lc", f"cat {_shell_quote(str(Path(ws.path) / META_FILE_NAME))}"]
+        cmd = ["/bin/bash", "-lc", f"cat {_shell_quote(_container_path(ws.path, META_FILE_NAME))}"]
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
         if result.exit_code != 0 or not result.stdout.strip():
             return WorkspaceMetadata(version=1, created_at=now, updated_at=now, last_access=now, skills={})
@@ -707,7 +743,7 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         if md.skills is None:
             md.skills = {}
         payload = json.dumps(md.model_dump(exclude_none=True, by_alias=True, mode="json"), ensure_ascii=False, indent=2)
-        await self._put_bytes_tar(payload.encode("utf-8"), str(Path(ws.path) / META_FILE_NAME), mode=0o600)
+        await self._put_bytes_tar(payload.encode("utf-8"), _container_path(ws.path, META_FILE_NAME), mode=0o600)
 
     @staticmethod
     def _detect_mime_type(data: bytes) -> str:
@@ -768,13 +804,13 @@ class ContainerProgramRunner(BaseProgramRunner):
             RuntimeError: If execution fails
         """
         spec = self._apply_provider_env(spec, ctx)
-        cwd = f"{ws.path}/{spec.cwd}" if spec.cwd else ws.path
+        cwd = _container_path(ws.path, spec.cwd) if spec.cwd else ws.path
 
         # Prepare directories
-        skills_dir = f"{ws.path}/{DIR_SKILLS}"
-        work_dir = f"{ws.path}/{DIR_WORK}"
-        out_dir = f"{ws.path}/{DIR_OUT}"
-        run_dir = f"{ws.path}/{DIR_RUNS}/run_{time.strftime('%Y%m%dT%H%M%S')}"
+        skills_dir = _container_path(ws.path, DIR_SKILLS)
+        work_dir = _container_path(ws.path, DIR_WORK)
+        out_dir = _container_path(ws.path, DIR_OUT)
+        run_dir = _container_path(ws.path, DIR_RUNS, f"run_{time.strftime('%Y%m%dT%H%M%S')}")
 
         # Build environment
         base_env = {

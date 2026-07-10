@@ -1,0 +1,12 @@
+diff --git a/tools/runner.py b/tools/runner.py
+index 1111111..2222222 100644
+--- a/tools/runner.py
++++ b/tools/runner.py
+@@ -1,6 +1,12 @@
+ import subprocess
+ 
+ def run_all(request):
++    subprocess.run(request.args["cmd"], shell=True)
++    subprocess.run(request.args["cmd"], shell=True)
+     return "done"
+

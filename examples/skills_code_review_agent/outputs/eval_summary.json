@@ -1,0 +1,87 @@
+{
+  "fixtures": [
+    {
+      "conclusion": "No deterministic findings.",
+      "findings": 0,
+      "fixture": "clean",
+      "needs_human_review": 0,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_075d8b9f03b03afc",
+      "warnings": 0
+    },
+    {
+      "conclusion": "High-confidence issues require changes before merge.",
+      "findings": 5,
+      "fixture": "security",
+      "needs_human_review": 0,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_fe7d3500a1f9397c",
+      "warnings": 2
+    },
+    {
+      "conclusion": "Review found deterministic issues to address.",
+      "findings": 3,
+      "fixture": "async_resource_leak",
+      "needs_human_review": 1,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_f5711bfa05387f74",
+      "warnings": 3
+    },
+    {
+      "conclusion": "Review found deterministic issues to address.",
+      "findings": 3,
+      "fixture": "db_lifecycle",
+      "needs_human_review": 1,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_fa79ea1c73bb2c6a",
+      "warnings": 2
+    },
+    {
+      "conclusion": "No deterministic findings.",
+      "findings": 0,
+      "fixture": "missing_tests",
+      "needs_human_review": 0,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_b4686c1e200ff9bf",
+      "warnings": 2
+    },
+    {
+      "conclusion": "High-confidence issues require changes before merge.",
+      "findings": 2,
+      "fixture": "duplicate_finding",
+      "needs_human_review": 0,
+      "redactions": 0,
+      "sandbox_failures": 0,
+      "task_id": "review_a31846593f9627e2",
+      "warnings": 1
+    },
+    {
+      "conclusion": "No high-confidence findings, but human review is needed for warnings or sandbox state.",
+      "findings": 0,
+      "fixture": "sandbox_failure",
+      "needs_human_review": 1,
+      "redactions": 0,
+      "sandbox_failures": 1,
+      "task_id": "review_88e837641507676a",
+      "warnings": 2
+    },
+    {
+      "conclusion": "High-confidence issues require changes before merge.",
+      "findings": 6,
+      "fixture": "secret_redaction",
+      "needs_human_review": 0,
+      "redactions": 6,
+      "sandbox_failures": 0,
+      "task_id": "review_5652013570769b5e",
+      "warnings": 1
+    }
+  ],
+  "total_findings": 19,
+  "total_fixtures": 8,
+  "total_needs_human_review": 3
+}
