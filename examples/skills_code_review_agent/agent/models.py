@@ -11,6 +11,7 @@ import hashlib
 import re
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel
@@ -36,14 +37,40 @@ def finding_dedupe_key(file: str, line: int, category: str, title: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+class ReviewTaskStatus(str, Enum):
+    CREATED = "created"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+TERMINAL_TASK_STATUSES = frozenset({
+    ReviewTaskStatus.COMPLETED,
+    ReviewTaskStatus.COMPLETED_WITH_ERRORS,
+    ReviewTaskStatus.BLOCKED,
+    ReviewTaskStatus.FAILED,
+})
+
+
 class ReviewTask(BaseModel):
     task_id: str
     input_type: str
     input_ref: str = ""
     runtime: str = "container"
     dry_run: bool = False
-    status: str = "created"
+    status: ReviewTaskStatus = ReviewTaskStatus.CREATED
     created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+    failure_kind: str = ""
+    failure_reason_redacted: str = ""
+
+    @model_validator(mode="after")
+    def _validate_failure_details(self) -> "ReviewTask":
+        if self.status != ReviewTaskStatus.FAILED and (self.failure_kind or self.failure_reason_redacted):
+            raise ValueError("failure details require failed task status")
+        return self
 
 
 class ChangedLine(BaseModel):
@@ -123,7 +150,9 @@ class ReviewWarning(BaseModel):
 class FilterIntercept(BaseModel):
     intercept_id: str
     task_id: str = ""
+    request_id: str = ""
     decision: str
+    error_kind: str = ""
     reason: str
     command: list[str] = Field(default_factory=list)
     runtime: str = ""
@@ -134,6 +163,7 @@ class FilterIntercept(BaseModel):
 class SandboxRun(BaseModel):
     run_id: str
     task_id: str = ""
+    request_id: str = ""
     runtime: str
     command: list[str] = Field(default_factory=list)
     decision: str = "allow"
@@ -148,6 +178,7 @@ class SandboxRun(BaseModel):
     output_truncated: bool = False
     output_file_count: int = 0
     output_bytes: int = 0
+    failure_kind: str = ""
     failure_reason: str = ""
     warning: str = ""
     created_at: str = Field(default_factory=utc_now)

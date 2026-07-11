@@ -7,12 +7,359 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from agent.models import Finding
 from agent.models import RedactionSummary
 from agent.models import ReviewTask
 from agent.models import SandboxRun
 from agent.models import TelemetrySummary
 from agent.storage import ReviewStorage
+
+LEGACY_SCHEMA = """
+CREATE TABLE review_tasks (
+    task_id VARCHAR(128) PRIMARY KEY,
+    input_type VARCHAR(64) NOT NULL,
+    input_ref TEXT NOT NULL,
+    runtime VARCHAR(64) NOT NULL,
+    dry_run BOOLEAN NOT NULL,
+    status VARCHAR(64) NOT NULL,
+    created_at VARCHAR(64) NOT NULL
+);
+CREATE TABLE review_inputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id VARCHAR(128) NOT NULL,
+    redacted_diff TEXT NOT NULL,
+    changed_files_json TEXT NOT NULL,
+    redaction_summary_json TEXT NOT NULL,
+    input_metadata_json TEXT NOT NULL
+);
+CREATE TABLE sandbox_runs (
+    run_id VARCHAR(160) PRIMARY KEY,
+    task_id VARCHAR(128) NOT NULL,
+    runtime VARCHAR(64) NOT NULL,
+    command_json TEXT NOT NULL,
+    decision VARCHAR(64) NOT NULL,
+    exit_code INTEGER NOT NULL,
+    timed_out BOOLEAN NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    stdout TEXT NOT NULL,
+    stderr TEXT NOT NULL,
+    output_files_json TEXT NOT NULL,
+    stdout_truncated BOOLEAN NOT NULL DEFAULT 0,
+    stderr_truncated BOOLEAN NOT NULL DEFAULT 0,
+    output_truncated BOOLEAN NOT NULL DEFAULT 0,
+    output_file_count INTEGER NOT NULL DEFAULT 0,
+    output_bytes INTEGER NOT NULL DEFAULT 0,
+    failure_reason TEXT,
+    warning TEXT NOT NULL,
+    created_at VARCHAR(64) NOT NULL
+);
+CREATE TABLE findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id VARCHAR(128) NOT NULL,
+    dedupe_key VARCHAR(64) NOT NULL,
+    severity VARCHAR(32) NOT NULL,
+    category VARCHAR(64) NOT NULL,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    recommendation TEXT NOT NULL,
+    confidence FLOAT NOT NULL,
+    source_json TEXT NOT NULL
+);
+CREATE TABLE filter_intercepts (
+    intercept_id VARCHAR(160) PRIMARY KEY,
+    task_id VARCHAR(128) NOT NULL,
+    decision VARCHAR(64) NOT NULL,
+    reason TEXT NOT NULL,
+    command_json TEXT NOT NULL,
+    runtime VARCHAR(64) NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at VARCHAR(64) NOT NULL
+);
+CREATE TABLE telemetry_summaries (
+    task_id VARCHAR(128) PRIMARY KEY,
+    metrics_json TEXT NOT NULL,
+    created_at VARCHAR(64) NOT NULL
+);
+CREATE TABLE reports (
+    task_id VARCHAR(128) PRIMARY KEY,
+    json_report TEXT NOT NULL,
+    markdown_report TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    markdown_path TEXT NOT NULL,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    created_at VARCHAR(64) NOT NULL
+);
+"""
+
+
+def _create_legacy_database(tmp_path) -> str:
+    db_path = tmp_path / "legacy.db"
+    created_at = "2026-07-10T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.execute(
+            "INSERT INTO review_tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("legacy-task", "fixture", "fixture:clean", "container", 1, "completed", created_at),
+        )
+        conn.execute(
+            "INSERT INTO review_inputs "
+            "(task_id, redacted_diff, changed_files_json, redaction_summary_json, input_metadata_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-task", "redacted diff", '["legacy.py"]', "{}", '{"fixture_names": ["clean"]}'),
+        )
+        conn.execute(
+            "INSERT INTO sandbox_runs VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-run",
+                "legacy-task",
+                "container",
+                '["python3", "scripts/run_static_review.py"]',
+                "allow",
+                0,
+                0,
+                12,
+                "legacy stdout",
+                "",
+                '{"out/findings.json": "{}"}',
+                0,
+                0,
+                0,
+                1,
+                2,
+                None,
+                "",
+                created_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO findings "
+            "(task_id, dedupe_key, severity, category, file, line, title, evidence, "
+            "recommendation, confidence, source_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-task",
+                "legacy-dedupe",
+                "low",
+                "legacy",
+                "legacy.py",
+                1,
+                "legacy finding",
+                "legacy evidence",
+                "review it",
+                0.8,
+                '["legacy"]',
+            ),
+        )
+        conn.execute(
+            "INSERT INTO filter_intercepts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-intercept",
+                "legacy-task",
+                "deny",
+                "legacy policy denial",
+                '["python3", "unknown.py"]',
+                "container",
+                "{}",
+                created_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO telemetry_summaries VALUES (?, ?, ?)",
+            ("legacy-task", '{"task_id": "legacy-task"}', created_at),
+        )
+        conn.execute(
+            "INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-task",
+                '{"task_id": "legacy-task"}',
+                "# Legacy report\n",
+                "out/legacy.json",
+                "out/legacy.md",
+                '{"conclusion": "legacy"}',
+                created_at,
+            ),
+        )
+    return f"sqlite:///{db_path}"
+
+
+def _column_names(conn, table: str) -> set[str]:
+    return {row[1] for row in conn.exec_driver_sql(f'PRAGMA table_info("{table}")').all()}
+
+
+def _foreign_key(conn, table: str, column: str) -> tuple[str, str] | None:
+    for row in conn.exec_driver_sql(f'PRAGMA foreign_key_list("{table}")').all():
+        if row[3] == column:
+            return row[2], row[6]
+    return None
+
+
+def _index_exists(
+    conn,
+    table: str,
+    columns: list[str],
+    *,
+    unique: bool | None = None,
+    partial: bool | None = None,
+) -> bool:
+    for row in conn.exec_driver_sql(f'PRAGMA index_list("{table}")').all():
+        if unique is not None and bool(row[2]) is not unique:
+            continue
+        if partial is not None and bool(row[4]) is not partial:
+            continue
+        indexed = [item[2] for item in conn.exec_driver_sql(f'PRAGMA index_info("{row[1]}")').all()]
+        if indexed == columns:
+            return True
+    return False
+
+
+def test_new_database_records_all_bundled_migrations(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+
+    with storage.engine.connect() as conn:
+        versions = conn.exec_driver_sql("SELECT version FROM schema_migrations ORDER BY version").scalars().all()
+
+    assert versions == ["002_review_lifecycle"]
+
+
+def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
+    db_url = _create_legacy_database(tmp_path)
+    storage = ReviewStorage(db_url)
+    task_owned_tables = (
+        "review_inputs",
+        "sandbox_runs",
+        "findings",
+        "filter_intercepts",
+        "telemetry_summaries",
+        "reports",
+    )
+
+    with storage.engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        assert {
+            "updated_at",
+            "failure_kind",
+            "failure_reason_redacted",
+        } <= _column_names(conn, "review_tasks")
+        assert {"request_id", "failure_kind"} <= _column_names(conn, "sandbox_runs")
+        assert {"request_id", "error_kind"} <= _column_names(conn, "filter_intercepts")
+        for table in task_owned_tables:
+            assert _foreign_key(conn, table, "task_id") == ("review_tasks", "CASCADE")
+            assert _index_exists(conn, table, ["task_id"])
+            assert conn.exec_driver_sql(f'SELECT count(*) FROM "{table}"').scalar_one() == 1
+        assert _index_exists(
+            conn,
+            "sandbox_runs",
+            ["task_id", "request_id"],
+            unique=True,
+            partial=True,
+        )
+        assert _index_exists(
+            conn,
+            "filter_intercepts",
+            ["task_id", "request_id"],
+            unique=True,
+            partial=True,
+        )
+        task_row = conn.exec_driver_sql(
+            "SELECT updated_at, failure_kind, failure_reason_redacted FROM review_tasks").one()
+        run_row = conn.exec_driver_sql(
+            "SELECT request_id, failure_kind, stdout, output_file_count FROM sandbox_runs").one()
+        decision_row = conn.exec_driver_sql("SELECT request_id, error_kind, reason FROM filter_intercepts").one()
+        assert task_row == ("2026-07-10T00:00:00+00:00", "", "")
+        assert run_row == ("legacy:legacy-run", "", "legacy stdout", 1)
+        assert decision_row == (
+            "legacy:legacy-intercept",
+            "policy_denied",
+            "legacy policy denial",
+        )
+        assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+
+    repeated = ReviewStorage(db_url)
+    with repeated.engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT count(*) FROM schema_migrations "
+                                    "WHERE version='002_review_lifecycle'").scalar_one() == 1
+        assert conn.exec_driver_sql("SELECT count(*) FROM sandbox_runs").scalar_one() == 1
+        assert conn.exec_driver_sql("SELECT count(*) FROM filter_intercepts").scalar_one() == 1
+
+
+def test_legacy_migration_with_orphan_never_records_success_or_skips_retry(tmp_path):
+    db_url = _create_legacy_database(tmp_path)
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO review_inputs "
+            "(task_id, redacted_diff, changed_files_json, redaction_summary_json, input_metadata_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("missing-task", "orphan diff", "[]", "{}", "{}"),
+        )
+
+    with pytest.raises(RuntimeError, match="orphan task rows prevent migration"):
+        ReviewStorage(db_url)
+
+    with sqlite3.connect(db_path) as conn:
+        migration_table_exists = conn.execute("SELECT count(*) FROM sqlite_master "
+                                              "WHERE type='table' AND name='schema_migrations'").fetchone()[0]
+        migration_count = (conn.execute("SELECT count(*) FROM schema_migrations "
+                                        "WHERE version='002_review_lifecycle'").fetchone()[0]
+                           if migration_table_exists else 0)
+        task_columns = {row[1] for row in conn.execute("PRAGMA table_info(review_tasks)")}
+        assert migration_count == 0
+        assert "updated_at" not in task_columns
+        assert conn.execute("SELECT count(*) FROM review_tasks").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM review_inputs").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM sandbox_runs").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM filter_intercepts").fetchone()[0] == 1
+
+    with pytest.raises(RuntimeError, match="orphan task rows prevent migration"):
+        ReviewStorage(db_url)
+
+
+def test_ledger_write_failure_rolls_back_the_entire_legacy_migration(tmp_path):
+    db_url = _create_legacy_database(tmp_path)
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE schema_migrations (
+                version VARCHAR(128) PRIMARY KEY,
+                applied_at VARCHAR(64) NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TRIGGER block_migration_ledger
+            BEFORE INSERT ON schema_migrations
+            BEGIN
+                SELECT RAISE(FAIL, 'ledger write blocked');
+            END;
+        """)
+
+    def assert_legacy_database_is_unchanged() -> None:
+        with sqlite3.connect(db_path) as conn:
+            task_columns = {row[1] for row in conn.execute("PRAGMA table_info(review_tasks)")}
+            assert "updated_at" not in task_columns
+            assert conn.execute("SELECT count(*) FROM schema_migrations "
+                                "WHERE version='002_review_lifecycle'").fetchone()[0] == 0
+            for table in (
+                    "review_tasks",
+                    "review_inputs",
+                    "sandbox_runs",
+                    "findings",
+                    "filter_intercepts",
+                    "telemetry_summaries",
+                    "reports",
+            ):
+                assert conn.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.IntegrityError, match="ledger write blocked"):
+        ReviewStorage(db_url)
+    assert_legacy_database_is_unchanged()
+
+    with pytest.raises(sqlite3.IntegrityError, match="ledger write blocked"):
+        ReviewStorage(db_url)
+    assert_legacy_database_is_unchanged()
 
 
 def test_storage_roundtrip_by_task_id(tmp_path):

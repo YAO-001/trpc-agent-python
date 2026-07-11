@@ -415,6 +415,7 @@ def test_storage_json_columns_preserve_primitives_and_redact_strings(tmp_path):
         metadata=structured,
     )
 
+    storage.save_task(ReviewTask(task_id=task_id, input_type="fixture", dry_run=True))
     storage.save_input(
         task_id=task_id,
         redacted_diff="",
