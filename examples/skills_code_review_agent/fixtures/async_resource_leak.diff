@@ -2,7 +2,7 @@ diff --git a/app/async_worker.py b/app/async_worker.py
 index 1111111..2222222 100644
 --- a/app/async_worker.py
 +++ b/app/async_worker.py
-@@ -1,6 +1,16 @@
+@@ -1,8 +1,16 @@
  import aiohttp
  import asyncio
  

@@ -15,7 +15,7 @@ diff --git a/tests/test_calculator.py b/tests/test_calculator.py
 index 3333333..4444444 100644
 --- a/tests/test_calculator.py
 +++ b/tests/test_calculator.py
-@@ -1,5 +1,8 @@
+@@ -1,4 +1,8 @@
  from src.calculator import add
 +from src.calculator import subtract
  

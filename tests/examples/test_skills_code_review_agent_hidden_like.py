@@ -227,7 +227,7 @@ def test_hidden_like_host_and_sandbox_secret_confidence_match(
 index 1111111..2222222 100644
 --- a/src/app/settings.py
 +++ b/src/app/settings.py
-@@ -1 +1,2 @@
+@@ -0,0 +1 @@
 +{content}
 """
     host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
@@ -258,7 +258,7 @@ def test_hidden_like_real_secret_cannot_be_downgraded_by_leading_dummy(tmp_path)
 index 1111111..2222222 100644
 --- a/src/app/settings.py
 +++ b/src/app/settings.py
-@@ -1 +1,2 @@
+@@ -0,0 +1 @@
 +{content}
 """
 
@@ -288,7 +288,7 @@ def test_hidden_like_hash_prefix_collision_defaults_to_high_confidence(tmp_path)
 index 1111111..2222222 100644
 --- a/src/app/settings.py
 +++ b/src/app/settings.py
-@@ -1 +1,2 @@
+@@ -0,0 +1 @@
 +{content}
 """
 
@@ -317,7 +317,7 @@ def test_hidden_like_rule_engine_keeps_dummy_fixture_secret_out_of_high_findings
 index 1111111..2222222 100644
 --- a/tests/fixtures/config.py
 +++ b/tests/fixtures/config.py
-@@ -1,2 +1,3 @@
+@@ -0,0 +1,2 @@
 +api_key = "dummy-secret-for-tests"
 +password = "changeme"
 """

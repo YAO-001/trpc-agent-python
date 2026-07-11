@@ -75,7 +75,7 @@ def test_dummy_secret_is_redacted_and_routes_to_low_confidence_review():
 index 1111111..2222222 100644
 --- a/app/config.py
 +++ b/app/config.py
-@@ -1,2 +1,4 @@
+@@ -0,0 +1 @@
 +api_key = "dummy-secret-for-tests"
 """
     boundary = RedactionBoundary()
@@ -95,7 +95,7 @@ def test_real_secret_routes_to_high_confidence_finding():
 index 1111111..2222222 100644
 --- a/app/config.py
 +++ b/app/config.py
-@@ -1,2 +1,4 @@
+@@ -0,0 +1 @@
 +client_secret = "production-secret-value-987"
 """
     boundary = RedactionBoundary()

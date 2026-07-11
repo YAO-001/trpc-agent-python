@@ -745,7 +745,7 @@ def test_orchestrator_sanitizes_complete_payload_before_sandbox(tmp_path, monkey
 index 1111111..2222222 100644
 --- a/src/config.py
 +++ b/src/config.py
-@@ -1 +1,2 @@
+@@ -0,0 +1,2 @@
 +client_secret = "opaque-input-token-987"
 +print("safe context")
 """,
