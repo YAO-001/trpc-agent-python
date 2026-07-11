@@ -11,7 +11,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 from pathlib import Path
+
+
+def _input_is_contained(input_path: Path) -> bool:
+    resolved = input_path.resolve()
+    skills_dir = os.environ.get("SKILLS_DIR")
+    skill_root = ((Path(skills_dir) / "code-review") if skills_dir else Path(__file__).resolve().parents[1])
+    expected_root = (skill_root / "work" / "inputs").resolve()
+    scripts_root = (skill_root / "scripts").resolve()
+    return resolved.parent == expected_root and scripts_root not in resolved.parents
+
+
+def _network_probe_is_blocked() -> bool:
+    try:
+        with socket.create_connection(("192.0.2.1", 9), timeout=0.2):
+            return False
+    except OSError:
+        return True
 
 
 def main() -> int:
@@ -19,8 +37,13 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    ok = bool(payload.get("task_id"))
+    input_path = Path(args.input)
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    input_contained = _input_is_contained(input_path)
+    network_probe_blocked = _network_probe_is_blocked()
+    # Local development intentionally has network access; the probe is evidence
+    # consumed by the required container test, not a finding by itself.
+    ok = bool(payload.get("task_id")) and input_contained
     large_output_size = int(payload.get("emit_large_output") or 0)
     if large_output_size:
         print("x" * large_output_size)
@@ -29,6 +52,8 @@ def main() -> int:
         "status": "ok" if ok else "failed",
         "message": "review input is well formed" if ok else "missing task_id",
         "secret_token_in_env": "SECRET_TOKEN" in os.environ,
+        "input_contained": input_contained,
+        "network_probe_blocked": network_probe_blocked,
         "findings": [],
         "warnings": [],
         "needs_human_review": [],

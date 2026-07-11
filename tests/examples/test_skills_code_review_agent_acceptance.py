@@ -83,3 +83,16 @@ def test_dry_run_acceptance_finishes_under_120_seconds(tmp_path):
     started = time.monotonic()
     evaluate_acceptance(output_dir=tmp_path, db_url=f"sqlite:///{tmp_path / 'full.db'}", include_fixtures=True)
     assert time.monotonic() - started < 120
+
+
+def test_required_docker_gate_and_final_runtime_docs():
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    readme = (root / "examples" / "skills_code_review_agent" / "README.md").read_text(encoding="utf-8")
+    docker_tests = (Path(__file__).with_name("test_skills_code_review_agent_docker.py")).read_text(encoding="utf-8")
+    assert "code-review-docker:" in workflow
+    assert 'pytest -m "not docker_required"' in workflow
+    assert "docker info" in workflow
+    assert "pytest.skip" not in docker_tests
+    assert "optional container" not in readme.lower()
+    assert "falls back to local" not in readme.lower()

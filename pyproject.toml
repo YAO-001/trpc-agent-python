@@ -206,3 +206,4 @@ minversion = "6.0"
 addopts = "-ra -q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["docker_required: requires a working Docker daemon and must never be skipped in the Docker CI job"]

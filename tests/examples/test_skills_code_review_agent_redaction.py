@@ -342,7 +342,7 @@ def test_report_builder_preserves_json_primitives_under_sensitive_keys(tmp_path)
         needs_human_review=[],
         filter_intercepts=[],
         sandbox_runs=[],
-        telemetry=TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED),
+        telemetry=TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED, task_failure_kind=""),
         redaction_summary=RedactionSummary(),
         input_summary=input_summary,
     )
@@ -362,7 +362,7 @@ def test_orchestrator_persistence_bundle_preserves_json_primitives():
             "auth-token": 7
         },
     }
-    telemetry = TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED)
+    telemetry = TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED, task_failure_kind="")
     report = ReviewReport(
         task_id=task_id,
         task_status=ReviewTaskStatus.COMPLETED,
@@ -401,7 +401,7 @@ def test_storage_json_columns_preserve_primitives_and_redact_strings(tmp_path):
         "api_key": raw,
     }
     storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
-    telemetry = TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED)
+    telemetry = TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED, task_failure_kind="")
     report = ReviewReport(
         task_id=task_id,
         task_status=ReviewTaskStatus.COMPLETED,
@@ -464,7 +464,7 @@ def test_storage_rejects_invalid_json_blob(tmp_path):
         task_id=task_id,
         task_status=ReviewTaskStatus.COMPLETED,
         conclusion="No deterministic findings.",
-        telemetry=TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED),
+        telemetry=TelemetrySummary(task_id=task_id, task_status=ReviewTaskStatus.COMPLETED, task_failure_kind=""),
     )
 
     with pytest.raises(ValueError, match="json_report must contain valid JSON"):

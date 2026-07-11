@@ -1,5 +1,9 @@
 # 设计说明
 
-本示例把自动代码审查拆成确定性核心和 Skill 执行层。输入解析器读取 unified diff、仓库 git diff 或 fixture，并在入库前先做密钥脱敏；规则引擎与 Skill 脚本只产生候选项，由同一结果边界按置信度分为 finding、warning 与人工复核项。Skill 层通过 `SkillToolSet` 和 `skill_run` 在容器 workspace 中运行 stdlib-only 脚本，local 仅作为显式开发 fallback。所有命令在进入 sandbox 前先经过 `ReviewExecutionPolicy`，危险命令、敏感路径、越界输出、泄露型 env、网络和安装包请求会被拒绝或进入人工复核。sandbox stdout、stderr 与 output artifacts 再次执行截断和脱敏后才合并为 findings 并持久化。SQLite schema 按 task、input、sandbox_runs、findings、filter_intercepts、telemetry_summaries、reports 分表保存审计链路。dedupe 严格使用文件、行号和类别合并来源，降低噪声。telemetry 记录命中数、截断数、过滤拦截、sandbox 失败和脱敏数量，报告只暴露可复核证据与修复建议。
+本示例把代码审查组织成固定流水线：输入解析、秘密脱敏、策略门禁、沙箱执行、结果规范化、审计存储与报告生成。解析器支持补丁、仓库和文件清单；原始内容进入沙箱前先脱敏，日志、产物、数据库字段和报告在持久化前再次经过同一边界。主机规则与技能脚本共享结构，并按文件、行号和类别去重。
 
-The core audit chain does not depend on a real model API; an LLM can be added later as a summarization layer, while the accepted deterministic dry-run path remains reproducible.
+每次调用都转换为不可变请求。命令、目录、输入、输出预算、环境、网络和超时必须通过策略检查；被拒绝或待批准的请求不会暂存文件或启动进程。自动运行只选择容器一次，容器不可用时立即失败，不会暗中降级。本地模式仅供显式开发和离线验收。
+
+任务按已创建、运行中、完成、带错误完成、阻止和失败流转。策略决定与执行尝试立即写入审计表，启动失败也保留记录；终态、指标和报告在同一事务中提交。执行器在运行期间限制标准输出、错误输出和产物字节数，超时或超限会终止进程组并确认其消失。容器限制处理器、内存、进程数、网络和临时磁盘，并使用只读根文件系统。
+
+验收用独立冻结语料计算高风险召回率、安全误报率和秘密脱敏召回率，标签不从预测生成。八个公开样例产生 JSON、Markdown 和完整数据库链路。真实容器测试检查资源、输入位置、固定网络探针、超时、流输出、产物超限和子进程清理；正常返回与异常路径都必须移除自有容器。持续集成把单元测试和真实容器测试设为必需任务。

@@ -32,9 +32,9 @@ jobs:
         id: changed
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FILES=$(git diff --name-only --diff-filter=ACM origin/${{ github.base_ref }}...HEAD -- '*.py' | grep '^trpc_agent_sdk/' || true)
+            FILES=$(git diff --name-only --diff-filter=ACM origin/${{ github.base_ref }}...HEAD -- '*.py' | grep -E '^(trpc_agent_sdk/|examples/skills_code_review_agent/|tests/examples/|tests/code_executors/|tests/skills/)' || true)
           else
-            FILES=$(git diff --name-only --diff-filter=ACM HEAD~1...HEAD -- '*.py' | grep '^trpc_agent_sdk/' || true)
+            FILES=$(git diff --name-only --diff-filter=ACM HEAD~1...HEAD -- '*.py' | grep -E '^(trpc_agent_sdk/|examples/skills_code_review_agent/|tests/examples/|tests/code_executors/|tests/skills/)' || true)
           fi
           if [ -z "$FILES" ]; then
             echo "has_files=false" >> "$GITHUB_OUTPUT"
@@ -62,6 +62,15 @@ jobs:
           FILES=$(cat "$RUNNER_TEMP/changed_py_files.txt" | tr '\n' ' ')
           flake8 $FILES
 
+      - name: Check changed whitespace
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="$(git rev-parse HEAD^)"
+          fi
+          git diff --check "$BASE"...HEAD
+
   test:
     runs-on: [self-hosted, trpc-agent-python-ci]
     timeout-minutes: 20
@@ -75,7 +84,7 @@ jobs:
 
       - name: Run tests with coverage
         # run: pytest --cov=trpc_agent_sdk --cov-report=xml --cov-report=term tests/
-        run: pytest --cov=trpc_agent_sdk --cov-report=xml --cov-report=term --cov-fail-under=80 tests/
+        run: pytest -m "not docker_required" --cov=trpc_agent_sdk --cov-report=xml --cov-report=term --cov-fail-under=80 tests/
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v4
@@ -83,6 +92,22 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           file: coverage.xml
+
+  code-review-docker:
+    runs-on: [self-hosted, trpc-agent-python-ci]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install package and dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Verify Docker daemon
+        run: docker info
+
+      - name: Run required code-review Docker tests
+        run: python -m pytest tests/examples/test_skills_code_review_agent_docker.py -m docker_required -v
 
   build:
     runs-on: [self-hosted, trpc-agent-python-ci]
