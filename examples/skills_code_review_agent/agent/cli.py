@@ -11,6 +11,7 @@ import argparse
 import json
 
 from .input_resolver import FIXTURE_ORDER
+from .evaluator import evaluate_acceptance
 from .orchestrator import ReviewOrchestrator
 from .storage import DEFAULT_DB_URL
 
@@ -47,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
     demo_filter.add_argument("--runtime", choices=["container", "local", "auto"], default="container")
     demo_filter.add_argument("--db-url", default=DEFAULT_DB_URL)
     demo_filter.add_argument("--output-dir", default=None)
+
+    acceptance = subparsers.add_parser("eval-acceptance", help="run the frozen Issue #92 acceptance corpora")
+    acceptance.add_argument("--dry-run", action="store_true")
+    acceptance.add_argument("--runtime", choices=["container", "local", "auto"], default="local")
+    acceptance.add_argument("--include-fixtures", action="store_true")
+    acceptance.add_argument("--db-url", default=DEFAULT_DB_URL)
+    acceptance.add_argument("--output-dir", required=True)
 
     return parser
 
@@ -110,6 +118,19 @@ def main(argv: list[str] | None = None) -> int:
             "database_query": report.database_query,
         })
         return 0
+    if args.command == "eval-acceptance":
+        if not args.dry_run or args.runtime != "local":
+            parser.error("eval-acceptance requires --dry-run --runtime local")
+        summary = evaluate_acceptance(
+            output_dir=args.output_dir,
+            db_url=args.db_url,
+            include_fixtures=args.include_fixtures,
+        )
+        _print_json(summary.model_dump(mode="json"))
+        passed = (summary.high_risk_recall >= 0.80 and summary.safe_false_positive_rate <= 0.15
+                  and summary.secret_redaction_recall >= 0.95 and not summary.raw_secret_leaks
+                  and summary.wall_clock_seconds < 120)
+        return 0 if passed else 1
     parser.error(f"unknown command {args.command}")
     return 2
 

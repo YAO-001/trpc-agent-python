@@ -1,0 +1,17 @@
+[
+  {"id":"argv_subprocess","changed_files":["src/safe/process.py","tests/test_process.py"],"added_lines":[{"file":"src/safe/process.py","line":10,"content":"subprocess.run(['tar', archive], shell=False)"}]},
+  {"id":"parameterized_dbapi","changed_files":["src/safe/db.py","tests/test_db.py"],"added_lines":[{"file":"src/safe/db.py","line":20,"content":"cursor.execute('SELECT * FROM users WHERE id=?', (user_id,))"}]},
+  {"id":"sqlalchemy_bindparam","changed_files":["src/safe/query.py","tests/test_query.py"],"added_lines":[{"file":"src/safe/query.py","line":30,"content":"stmt = text('SELECT * FROM users WHERE id=:id').bindparams(id=user_id)"}]},
+  {"id":"managed_file","changed_files":["src/safe/files.py","tests/test_files.py"],"added_lines":[{"file":"src/safe/files.py","line":40,"content":"with open(path) as stream:"}]},
+  {"id":"managed_aiohttp","changed_files":["src/safe/http.py","tests/test_http.py"],"added_lines":[{"file":"src/safe/http.py","line":50,"content":"async with aiohttp.ClientSession() as session:"}]},
+  {"id":"sqlite_finally","changed_files":["src/safe/cache.py","tests/test_cache_safe.py"],"added_lines":[{"file":"src/safe/cache.py","line":60,"content":"db = sqlite3.connect(path)","context_after":["try:","    refresh(db)","finally:","    db.close()"]}]},
+  {"id":"yaml_safe_load","changed_files":["src/safe/yaml_io.py","tests/test_yaml_io.py"],"added_lines":[{"file":"src/safe/yaml_io.py","line":70,"content":"data = yaml.safe_load(payload)"}]},
+  {"id":"trusted_pickle","changed_files":["src/safe/local_state.py","tests/test_local_state.py"],"added_lines":[{"file":"src/safe/local_state.py","line":80,"content":"state = pickle.loads(TRUSTED_LOCAL_BYTES)"}]},
+  {"id":"fixture_api_key","changed_files":["tests/test_auth.py"],"added_lines":[{"file":"tests/test_auth.py","line":90,"content":"api_key = 'dummy-api-key'"}]},
+  {"id":"fixture_password","changed_files":["tests/test_login.py"],"added_lines":[{"file":"tests/test_login.py","line":100,"content":"password = 'fixture-password'"}]},
+  {"id":"escaped_shell_text","changed_files":["src/safe/escape.py","tests/test_escape.py"],"added_lines":[{"file":"src/safe/escape.py","line":110,"content":"subprocess.run(shlex.split(command), shell=False)"}]},
+  {"id":"async_context_file","changed_files":["src/safe/async_file.py","tests/test_async_file.py"],"added_lines":[{"file":"src/safe/async_file.py","line":120,"content":"async with aiofiles.open(path) as stream:"}]},
+  {"id":"transaction_context","changed_files":["src/safe/transaction.py","tests/test_transaction.py"],"added_lines":[{"file":"src/safe/transaction.py","line":130,"content":"with engine.begin() as transaction:"}]},
+  {"id":"production_with_test","changed_files":["src/safe/feature.py","tests/test_feature_safe.py"],"added_lines":[{"file":"src/safe/feature.py","line":140,"content":"return stable_feature(value)"}]},
+  {"id":"documentation_only","changed_files":["docs/usage.md"],"added_lines":[{"file":"docs/usage.md","line":150,"content":"Use the documented safe configuration."}]}
+]
