@@ -21,9 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = subparsers.add_parser("review", help="run a review")
     review.add_argument("--diff-file")
-    review.add_argument("--repo-path")
+    review.add_argument("--repo-path", help="Git worktree whose staged, unstaged, and untracked changes are reviewed")
     review.add_argument("--fixture", choices=[*FIXTURE_ORDER, "all"])
-    review.add_argument("--file-list")
+    review.add_argument(
+        "--file-list",
+        help="non-empty literal repository-relative path selector; requires --repo-path",
+    )
     review.add_argument("--dry-run", action="store_true")
     review.add_argument("--runtime", choices=["container", "local", "auto"], default="container")
     review.add_argument("--db-url", default=DEFAULT_DB_URL)

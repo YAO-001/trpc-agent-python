@@ -523,10 +523,11 @@ class ReviewOrchestrator:
             "file_list": resolved.file_list,
         })
         redaction = boundary.text(resolved.diff_text)
-        parsed = parse_unified_diff(redaction.text)
-        if resolved_metadata["file_list"]:
-            parsed = parsed.model_copy(
-                update={"changed_files": sorted({*parsed.changed_files, *resolved_metadata["file_list"]})})
+        try:
+            parsed_raw = parse_unified_diff(resolved.diff_text)
+        except ValueError:
+            raise ValueError("invalid review diff syntax") from None
+        parsed = parsed_raw.__class__.model_validate(boundary.clean(parsed_raw.model_dump(mode="json")))
 
         task_id = _stable_task_id(
             input_type=resolved_metadata["input_type"],

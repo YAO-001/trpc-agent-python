@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -739,16 +740,13 @@ def test_clean_resolves_collision_with_an_existing_generated_suffix():
 
 def test_orchestrator_sanitizes_complete_payload_before_sandbox(tmp_path, monkeypatch):
     raw = "opaque-input-token-987"
-    diff_path = tmp_path / f"token={raw}.diff"
-    diff_path.write_text(
-        """diff --git a/src/config.py b/src/config.py
-index 1111111..2222222 100644
---- a/src/config.py
-+++ b/src/config.py
-@@ -0,0 +1,2 @@
-+client_secret = "opaque-input-token-987"
-+print("safe context")
-""",
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+    target = repo / "src" / f"token={raw}.py"
+    target.parent.mkdir()
+    target.write_text(
+        'client_secret = "opaque-input-token-987"\nprint("safe context")\n',
         encoding="utf-8",
     )
     file_list = tmp_path / "files.txt"
@@ -784,7 +782,7 @@ index 1111111..2222222 100644
         db_url=f"sqlite:///{tmp_path / 'review.db'}",
         output_dir=tmp_path / "out",
     ).review(
-        diff_file=str(diff_path),
+        repo_path=str(repo),
         file_list=str(file_list),
         dry_run=True,
         runtime="container",
@@ -811,3 +809,26 @@ index 1111111..2222222 100644
         assert payload["owned_input"] == {key: value for key, value in payload.items() if key != "owned_input"}
     assert raw not in json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
     assert owned_paths and all(not path.exists() for path in owned_paths)
+
+
+def test_orchestrator_redacts_raw_diff_parse_errors(tmp_path):
+    raw = "opaque-parse-token-987"
+    diff_path = tmp_path / "malformed.diff"
+    diff_path.write_text(
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1 +1 @@\n"
+        f"client_secret={raw}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as captured:
+        ReviewOrchestrator(
+            example_dir=EXAMPLE_DIR,
+            db_url=f"sqlite:///{tmp_path / 'review.db'}",
+            output_dir=tmp_path / "out",
+        ).review(diff_file=str(diff_path), dry_run=True, runtime="local")
+
+    assert raw not in str(captured.value)
+    assert str(captured.value) == "invalid review diff syntax"
+    assert captured.value.__cause__ is None
