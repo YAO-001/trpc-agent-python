@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,8 @@ _JSON_BLOB_FIELDS = frozenset({
     "metrics_json",
     "output_files_json",
     "redaction_summary_json",
+    "severity_distribution_json",
+    "exception_kind_distribution_json",
     "source_json",
     "summary_json",
 })
@@ -184,6 +187,14 @@ telemetry_summaries = Table(
         ForeignKey("review_tasks.task_id", ondelete="CASCADE"),
         primary_key=True,
     ),
+    Column("task_failure_kind", String(64), nullable=False, default=""),
+    Column("orchestration_elapsed_ms", Integer, nullable=False, default=0),
+    Column("sandbox_elapsed_ms", Integer, nullable=False, default=0),
+    Column("tool_attempts_count", Integer, nullable=False, default=0),
+    Column("tool_executed_count", Integer, nullable=False, default=0),
+    Column("severity_distribution_json", Text, nullable=False, default="{}"),
+    Column("exception_kind_distribution_json", Text, nullable=False, default="{}"),
+    Column("output_limit_exceeded_count", Integer, nullable=False, default=0),
     Column("metrics_json", Text, nullable=False),
     Column("created_at", String(64), nullable=False),
 )
@@ -502,9 +513,28 @@ class ReviewStorage:
         payload = self._safe_row(telemetry.model_dump(mode="json"))
         safe_telemetry = TelemetrySummary.model_validate(payload)
         return self._safe_row({
-            "task_id": safe_telemetry.task_id,
-            "metrics_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            "created_at": safe_telemetry.created_at,
+            "task_id":
+            safe_telemetry.task_id,
+            "task_failure_kind":
+            safe_telemetry.task_failure_kind,
+            "orchestration_elapsed_ms":
+            safe_telemetry.orchestration_elapsed_ms,
+            "sandbox_elapsed_ms":
+            safe_telemetry.sandbox_elapsed_ms,
+            "tool_attempts_count":
+            safe_telemetry.tool_attempts_count,
+            "tool_executed_count":
+            safe_telemetry.tool_executed_count,
+            "severity_distribution_json":
+            json.dumps(safe_telemetry.severity_distribution, ensure_ascii=False, sort_keys=True),
+            "exception_kind_distribution_json":
+            json.dumps(safe_telemetry.exception_kind_distribution, ensure_ascii=False, sort_keys=True),
+            "output_limit_exceeded_count":
+            safe_telemetry.output_limit_exceeded_count,
+            "metrics_json":
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            "created_at":
+            safe_telemetry.created_at,
         })
 
     def _report_row(
@@ -614,6 +644,7 @@ class ReviewStorage:
         findings: list[Finding],
         telemetry: TelemetrySummary,
         report: ReviewReport,
+        task_failure_kind: str,
     ) -> None:
         if ReviewStorage._canonical_models(report.filter_intercepts, "request_id") != ReviewStorage._canonical_models(
                 stored_decisions, "request_id"):
@@ -642,6 +673,17 @@ class ReviewStorage:
             sum(1 for item in stored_runs if item.stderr_truncated),
             "output_truncated_count":
             sum(1 for item in stored_runs if item.output_truncated),
+            "sandbox_elapsed_ms":
+            sum(item.duration_ms for item in stored_runs if item.execution_started),
+            "tool_attempts_count": len(stored_decisions),
+            "tool_executed_count": sum(1 for item in stored_runs if item.execution_started),
+            "severity_distribution": dict(Counter(item.severity for item in findings)),
+            "exception_kind_distribution": dict(Counter(
+                [item.error_kind for item in stored_decisions if item.error_kind]
+                + [item.failure_kind for item in stored_runs if item.failure_kind]
+                + ([task_failure_kind] if task_failure_kind else []))),
+            "output_limit_exceeded_count":
+            sum(1 for item in stored_runs if item.failure_kind == "output_limit_exceeded"),
         }
         actual_metrics = telemetry.model_dump(mode="json")
         if any(actual_metrics[key] != value for key, value in expected_audit_metrics.items()):
@@ -652,6 +694,8 @@ class ReviewStorage:
             raise ValueError("terminal warning count disagrees with report warnings")
         if telemetry.needs_human_review_count != len(report.needs_human_review):
             raise ValueError("terminal human review count disagrees with report warnings")
+        if telemetry.task_failure_kind != task_failure_kind:
+            raise ValueError("terminal task failure kind disagrees with task")
 
     def _validate_terminal_report_text(
         self,
@@ -913,6 +957,7 @@ class ReviewStorage:
                     findings=findings,
                     telemetry=telemetry,
                     report=report,
+                    task_failure_kind=task.failure_kind,
                 )
                 canonical_report = self._canonical_terminal_report(
                     task_id=task.task_id,

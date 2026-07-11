@@ -22,6 +22,7 @@ from agent.input_resolver import EXAMPLE_DIR
 from agent.models import DRY_RUN_TIMESTAMP
 from agent.models import FilterIntercept
 from agent.models import Finding
+from agent.models import ParsedDiff
 from agent.models import RedactionSummary
 from agent.models import ReviewReport
 from agent.models import ReviewTask
@@ -37,6 +38,7 @@ from agent.sandbox_runner import SandboxRunner
 from agent.storage import ReviewStorage
 from agent.storage import ReviewStorageError
 from agent.task_state import transition_task
+from agent.telemetry import build_telemetry
 
 STATUSES = list(ReviewTaskStatus)
 ALLOWED = {
@@ -46,6 +48,125 @@ ALLOWED = {
     (ReviewTaskStatus.RUNNING, ReviewTaskStatus.BLOCKED),
     (ReviewTaskStatus.RUNNING, ReviewTaskStatus.FAILED),
 }
+
+
+def test_telemetry_counts_attempts_execution_time_and_failure_kinds():
+    finding = Finding(
+        severity="high",
+        category="security",
+        file="app.py",
+        line=1,
+        title="unsafe call",
+        evidence="unsafe()",
+        recommendation="use safe call",
+        confidence=0.9,
+        source=["test"],
+    )
+    decisions = []
+    for index, decision in enumerate(["allow", "deny", "allow", "allow", "needs_human_review"], 1):
+        error_kind = {
+            "allow": "",
+            "deny": "policy_denied",
+            "needs_human_review": "approval_required",
+        }[decision]
+        decisions.append(
+            FilterIntercept(
+                intercept_id=f"filter-{index}",
+                task_id="task-1",
+                request_id=f"task-1:skill-run:{index}",
+                decision=decision,
+                error_kind=error_kind,
+                reason=decision,
+                runtime="container",
+                created_at=DRY_RUN_TIMESTAMP,
+            ))
+    runs = [
+        SandboxRun(
+            run_id="sandbox-1",
+            task_id="task-1",
+            request_id="task-1:skill-run:1",
+            runtime="container",
+            decision="allow",
+            duration_ms=30,
+            execution_started=True,
+            created_at=DRY_RUN_TIMESTAMP,
+        ),
+        SandboxRun(
+            run_id="sandbox-3",
+            task_id="task-1",
+            request_id="task-1:skill-run:3",
+            runtime="container",
+            decision="allow",
+            duration_ms=20,
+            failure_kind="output_limit_exceeded",
+            execution_started=True,
+            created_at=DRY_RUN_TIMESTAMP,
+        ),
+        SandboxRun(
+            run_id="sandbox-4",
+            task_id="task-1",
+            request_id="task-1:skill-run:4",
+            runtime="container",
+            decision="allow",
+            failure_kind="runtime_unavailable",
+            execution_started=False,
+            created_at=DRY_RUN_TIMESTAMP,
+        ),
+    ]
+
+    telemetry = build_telemetry(
+        task_id="task-1",
+        task_status=ReviewTaskStatus.BLOCKED,
+        task_failure_kind="",
+        parsed_diff=ParsedDiff(changed_files=["a.py"], total_added_lines=2),
+        findings=[finding],
+        warnings=[],
+        needs_human_review=[],
+        filter_intercepts=decisions,
+        sandbox_runs=runs,
+        redaction_summary=RedactionSummary(total_redactions=2),
+        debug_dropped_count=1,
+        elapsed_ms=75,
+        dry_run=False,
+    )
+
+    assert telemetry.orchestration_elapsed_ms == telemetry.elapsed_ms == 75
+    assert telemetry.sandbox_elapsed_ms == 50
+    assert telemetry.tool_attempts_count == 5
+    assert telemetry.tool_executed_count == 2
+    assert telemetry.exception_kind_distribution == {
+        "approval_required": 1,
+        "output_limit_exceeded": 1,
+        "policy_denied": 1,
+        "runtime_unavailable": 1,
+    }
+    assert telemetry.severity_distribution == {"high": 1}
+    assert telemetry.output_limit_exceeded_count == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("sandbox_elapsed_ms", -1),
+    ("tool_attempts_count", True),
+    ("severity_distribution", {"high": -1}),
+    ("exception_kind_distribution", {"runtime_unavailable": False}),
+])
+def test_telemetry_rejects_non_integer_or_negative_counts(field, value):
+    payload = {
+        "task_id": "task-invalid-telemetry",
+        "task_status": ReviewTaskStatus.FAILED,
+        "task_failure_kind": "orchestration_error",
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        TelemetrySummary.model_validate(payload)
+
+
+def test_telemetry_requires_task_failure_kind():
+    with pytest.raises(ValidationError):
+        TelemetrySummary.model_validate({
+            "task_id": "task-missing-failure-kind",
+            "task_status": ReviewTaskStatus.COMPLETED,
+        })
 
 
 def _request(tmp_path, *, task_id="task-1", runtime="container"):
@@ -445,6 +566,7 @@ def test_terminal_bundle_rejects_missing_persisted_run(tmp_path):
     telemetry = TelemetrySummary(
         task_id=task.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
     )
     report = ReviewReport(
         task_id=task.task_id,
@@ -502,8 +624,12 @@ def test_terminal_bundle_rolls_back_when_final_report_insert_fails(tmp_path):
     telemetry = TelemetrySummary(
         task_id=task.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
         sandbox_runs_count=1,
         findings_count=1,
+        tool_attempts_count=1,
+        tool_executed_count=0,
+        severity_distribution={"high": 1},
     )
     builder = ReportBuilder(tmp_path / "out", _db_url(tmp_path))
     report = builder.build(
@@ -574,6 +700,7 @@ def test_terminal_bundle_rejects_cross_task_products_before_writing(tmp_path):
     telemetry = TelemetrySummary(
         task_id=other.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
     )
     report = ReviewReport(
         task_id=other.task_id,
@@ -610,6 +737,7 @@ def test_terminal_bundle_rejects_report_audit_that_differs_from_persisted_rows(t
     telemetry = TelemetrySummary(
         task_id=running.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
         sandbox_runs_count=1,
     )
     report_decisions = [decision]
@@ -656,6 +784,7 @@ def test_terminal_bundle_rejects_wrong_audit_failure_count(tmp_path):
     telemetry = TelemetrySummary(
         task_id=running.task_id,
         task_status=ReviewTaskStatus.COMPLETED_WITH_ERRORS,
+        task_failure_kind="",
         sandbox_runs_count=1,
         sandbox_failures_count=0,
     )
@@ -684,6 +813,49 @@ def test_terminal_bundle_rejects_wrong_audit_failure_count(tmp_path):
     assert rows["telemetry_summaries"] == rows["reports"] == []
 
 
+@pytest.mark.parametrize("field,value", [
+    ("sandbox_elapsed_ms", 1),
+    ("tool_attempts_count", 2),
+    ("tool_executed_count", 1),
+    ("severity_distribution", {"high": 1}),
+    ("exception_kind_distribution", {"orchestration_error": 1}),
+    ("output_limit_exceeded_count", 1),
+    ("task_failure_kind", "orchestration_error"),
+])
+def test_terminal_bundle_rejects_tampered_derived_telemetry(tmp_path, field, value):
+    storage, running, request, decision, run = _persisted_single_request_audit(
+        tmp_path,
+        task_id=f"task-tampered-telemetry-{field}",
+    )
+    terminal = transition_task(running, ReviewTaskStatus.COMPLETED)
+    telemetry = TelemetrySummary(
+        task_id=running.task_id,
+        task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
+        sandbox_runs_count=1,
+        tool_attempts_count=1,
+    ).model_copy(update={field: value})
+    report = ReviewReport(
+        task_id=running.task_id,
+        task_status=ReviewTaskStatus.COMPLETED,
+        conclusion="tampered telemetry",
+        filter_intercepts=[decision],
+        sandbox_runs=[run],
+        telemetry=telemetry,
+    )
+
+    with pytest.raises(ValueError, match="telemetry.*persisted audit|failure kind"):
+        storage.save_terminal_bundle(
+            task=terminal,
+            required_request_ids={request.request_id},
+            findings=[],
+            telemetry=telemetry,
+            report=report,
+            json_report="{}",
+            markdown_report="tampered telemetry",
+        )
+
+
 def test_terminal_bundle_rejects_report_telemetry_or_finding_count_mismatch(tmp_path):
     storage, running, request, decision, run = _persisted_single_request_audit(
         tmp_path,
@@ -703,6 +875,7 @@ def test_terminal_bundle_rejects_report_telemetry_or_finding_count_mismatch(tmp_
     telemetry = TelemetrySummary(
         task_id=running.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
         sandbox_runs_count=1,
         findings_count=0,
     )
@@ -713,7 +886,10 @@ def test_terminal_bundle_rejects_report_telemetry_or_finding_count_mismatch(tmp_
         findings=[finding],
         filter_intercepts=[decision],
         sandbox_runs=[run],
-        telemetry=telemetry.model_copy(update={"elapsed_ms": 1}),
+        telemetry=telemetry.model_copy(update={
+            "elapsed_ms": 1,
+            "orchestration_elapsed_ms": 1
+        }),
     )
 
     with pytest.raises(ValueError, match="telemetry|finding"):
@@ -742,7 +918,10 @@ def test_terminal_bundle_rejects_tampered_persisted_report_text(tmp_path, tamper
     telemetry = TelemetrySummary(
         task_id=running.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
         sandbox_runs_count=1,
+        tool_attempts_count=1,
+        tool_executed_count=0,
     )
     report = ReviewReport(
         task_id=running.task_id,
@@ -802,8 +981,12 @@ def test_terminal_bundle_rejects_self_consistent_report_with_tampered_derived_fi
     telemetry = TelemetrySummary(
         task_id=running.task_id,
         task_status=ReviewTaskStatus.COMPLETED,
+        task_failure_kind="",
         sandbox_runs_count=1,
         findings_count=1,
+        tool_attempts_count=1,
+        tool_executed_count=0,
+        severity_distribution={"high": 1},
     )
     builder = ReportBuilder(tmp_path / "out", _db_url(tmp_path))
     report = builder.build(

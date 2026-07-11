@@ -76,6 +76,14 @@ def _section_summary(
     severity_distribution: dict[str, int],
     recommendations: list[str],
 ) -> dict[str, Any]:
+    byte_totals = {
+        "stdout_observed": sum(item.stdout_bytes_observed for item in sandbox_runs),
+        "stdout_retained": sum(len(item.stdout.encode("utf-8")) for item in sandbox_runs),
+        "stderr_observed": sum(item.stderr_bytes_observed for item in sandbox_runs),
+        "stderr_retained": sum(len(item.stderr.encode("utf-8")) for item in sandbox_runs),
+        "output_observed": sum(item.output_bytes_observed for item in sandbox_runs),
+        "output_retained": sum(item.output_bytes for item in sandbox_runs),
+    }
     return {
         "task_status": telemetry.task_status.value,
         "findings_summary": {
@@ -100,11 +108,27 @@ def _section_summary(
         },
         "metrics": telemetry.model_dump(mode="json"),
         "sandbox_summary": {
-            "runs": len(sandbox_runs),
-            "failures_or_timeouts": telemetry.sandbox_failures_count,
-            "stdout_truncated": telemetry.stdout_truncated_count,
-            "stderr_truncated": telemetry.stderr_truncated_count,
-            "output_truncated": telemetry.output_truncated_count,
+            "runs":
+            len(sandbox_runs),
+            "attempts":
+            telemetry.tool_attempts_count,
+            "executions":
+            telemetry.tool_executed_count,
+            "failures_or_timeouts":
+            telemetry.sandbox_failures_count,
+            "stdout_truncated":
+            telemetry.stdout_truncated_count,
+            "stderr_truncated":
+            telemetry.stderr_truncated_count,
+            "output_truncated":
+            telemetry.output_truncated_count,
+            "bytes":
+            byte_totals,
+            "termination_reasons":
+            dict(
+                sorted((reason, sum(1 for item in sandbox_runs if item.termination_reason == reason))
+                       for reason in {item.termination_reason
+                                      for item in sandbox_runs if item.termination_reason})),
         },
         "recommendations": recommendations,
     }
@@ -518,6 +542,8 @@ class ReportBuilder:
             "## Sandbox Summary",
             "",
             f"- Runs: {len(report.sandbox_runs)}",
+            f"- Attempts: {report.telemetry.tool_attempts_count}",
+            f"- Executions: {report.telemetry.tool_executed_count}",
             f"- Failures/timeouts: {report.telemetry.sandbox_failures_count}",
             f"- Stdout truncated: {report.telemetry.stdout_truncated_count}",
             f"- Stderr truncated: {report.telemetry.stderr_truncated_count}",
@@ -526,11 +552,22 @@ class ReportBuilder:
         for run in report.sandbox_runs:
             lines.append(f"- `{' '.join(run.command)}` exit={run.exit_code} timed_out={run.timed_out} "
                          f"stdout_truncated={run.stdout_truncated} stderr_truncated={run.stderr_truncated} "
-                         f"output_truncated={run.output_truncated}")
+                         f"output_truncated={run.output_truncated} "
+                         f"execution_started={run.execution_started} "
+                         f"termination_reason={run.termination_reason or 'none'} "
+                         f"termination_confirmed={run.termination_confirmed} "
+                         f"stdout_bytes={len(run.stdout.encode('utf-8'))}/{run.stdout_bytes_observed} "
+                         f"stderr_bytes={len(run.stderr.encode('utf-8'))}/{run.stderr_bytes_observed} "
+                         f"output_bytes={run.output_bytes}/{run.output_bytes_observed}")
         lines.extend([
             "",
             "## Metrics",
             "",
+            f"- Orchestration elapsed ms: {report.telemetry.orchestration_elapsed_ms}",
+            f"- Sandbox elapsed ms: {report.telemetry.sandbox_elapsed_ms}",
+            f"- Severity distribution: `{json.dumps(report.telemetry.severity_distribution, sort_keys=True)}`",
+            f"- Exception distribution: `{json.dumps(report.telemetry.exception_kind_distribution, sort_keys=True)}`",
+            f"- Output limit exceeded: {report.telemetry.output_limit_exceeded_count}",
             f"- Files changed: {report.telemetry.files_changed}",
             f"- Added lines: {report.telemetry.lines_added}",
             f"- Redactions: {report.telemetry.redaction_count}",

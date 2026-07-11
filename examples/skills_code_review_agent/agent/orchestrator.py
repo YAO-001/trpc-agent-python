@@ -387,6 +387,7 @@ class ReviewOrchestrator:
         telemetry = build_telemetry(
             task_id=task.task_id,
             task_status=status,
+            task_failure_kind=task.failure_kind,
             parsed_diff=parsed,
             findings=findings,
             warnings=warnings,

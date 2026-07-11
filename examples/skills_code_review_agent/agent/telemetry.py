@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from .models import FilterIntercept
 from .models import Finding
 from .models import ParsedDiff
@@ -22,6 +24,7 @@ def build_telemetry(
     *,
     task_id: str,
     task_status: ReviewTaskStatus,
+    task_failure_kind: str,
     parsed_diff: ParsedDiff,
     findings: list[Finding],
     warnings: list[ReviewWarning],
@@ -33,10 +36,26 @@ def build_telemetry(
     elapsed_ms: int,
     dry_run: bool,
 ) -> TelemetrySummary:
+    orchestration_elapsed_ms = 0 if dry_run else elapsed_ms
+    # Count audit events at each layer, not distinct labels: the same label on a
+    # run and on its task is two independently persisted failure observations.
+    exception_kinds = Counter(item.error_kind for item in filter_intercepts if item.error_kind)
+    exception_kinds.update(item.failure_kind for item in sandbox_runs if item.failure_kind)
+    if task_failure_kind:
+        exception_kinds[task_failure_kind] += 1
+    severity_distribution = Counter(item.severity for item in findings)
     return TelemetrySummary(
         task_id=task_id,
         task_status=task_status,
-        elapsed_ms=0 if dry_run else elapsed_ms,
+        task_failure_kind=task_failure_kind,
+        orchestration_elapsed_ms=orchestration_elapsed_ms,
+        sandbox_elapsed_ms=sum(item.duration_ms for item in sandbox_runs if item.execution_started),
+        tool_attempts_count=len(filter_intercepts),
+        tool_executed_count=sum(1 for item in sandbox_runs if item.execution_started),
+        severity_distribution=dict(sorted(severity_distribution.items())),
+        exception_kind_distribution=dict(sorted(exception_kinds.items())),
+        output_limit_exceeded_count=sum(1 for item in sandbox_runs if item.failure_kind == "output_limit_exceeded"),
+        elapsed_ms=orchestration_elapsed_ms,
         files_changed=len(parsed_diff.changed_files),
         lines_added=parsed_diff.total_added_lines,
         findings_count=len(findings),

@@ -1067,6 +1067,36 @@ def test_review_report_contains_required_sections(tmp_path):
     ]:
         assert heading in markdown
 
+    telemetry = report_json["telemetry"]
+    for key in [
+            "task_failure_kind",
+            "orchestration_elapsed_ms",
+            "sandbox_elapsed_ms",
+            "tool_attempts_count",
+            "tool_executed_count",
+            "severity_distribution",
+            "exception_kind_distribution",
+            "output_limit_exceeded_count",
+    ]:
+        assert key in telemetry
+    sandbox_summary = report_json["section_summary"]["sandbox_summary"]
+    assert sandbox_summary["attempts"] == telemetry["tool_attempts_count"]
+    assert sandbox_summary["executions"] == telemetry["tool_executed_count"]
+    assert set(sandbox_summary["bytes"]) == {
+        "stdout_observed",
+        "stdout_retained",
+        "stderr_observed",
+        "stderr_retained",
+        "output_observed",
+        "output_retained",
+    }
+    assert "termination_reason=" in markdown
+    assert "stdout_bytes=" in markdown
+    assert "stderr_bytes=" in markdown
+    assert "output_bytes=" in markdown
+    assert "- Orchestration elapsed ms:" in markdown
+    assert "- Sandbox elapsed ms:" in markdown
+
 
 def test_query_task_returns_full_audit_chain(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'review.db'}"

@@ -263,6 +263,14 @@ def terminal_status(
 class TelemetrySummary(BaseModel):
     task_id: str
     task_status: ReviewTaskStatus
+    task_failure_kind: str
+    orchestration_elapsed_ms: int = 0
+    sandbox_elapsed_ms: int = 0
+    tool_attempts_count: int = 0
+    tool_executed_count: int = 0
+    severity_distribution: dict[str, int] = Field(default_factory=dict)
+    exception_kind_distribution: dict[str, int] = Field(default_factory=dict)
+    output_limit_exceeded_count: int = 0
     elapsed_ms: int = 0
     files_changed: int = 0
     lines_added: int = 0
@@ -279,6 +287,43 @@ class TelemetrySummary(BaseModel):
     redaction_count: int = 0
     debug_dropped_count: int = 0
     created_at: str = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_metrics(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        upgraded = dict(value)
+        if "orchestration_elapsed_ms" not in upgraded:
+            upgraded["orchestration_elapsed_ms"] = upgraded.get("elapsed_ms", 0)
+        if "elapsed_ms" not in upgraded:
+            upgraded["elapsed_ms"] = upgraded["orchestration_elapsed_ms"]
+        integer_fields = (
+            "orchestration_elapsed_ms", "sandbox_elapsed_ms", "tool_attempts_count",
+            "tool_executed_count", "output_limit_exceeded_count", "elapsed_ms",
+            "files_changed", "lines_added", "findings_count", "warnings_count",
+            "needs_human_review_count", "filter_denied_count",
+            "filter_needs_review_count", "sandbox_runs_count", "sandbox_failures_count",
+            "stdout_truncated_count", "stderr_truncated_count", "output_truncated_count",
+            "redaction_count", "debug_dropped_count",
+        )
+        for field in integer_fields:
+            raw = upgraded.get(field, 0)
+            if type(raw) is not int or raw < 0:
+                raise ValueError(f"{field} must be a non-negative integer")
+        for field in ("severity_distribution", "exception_kind_distribution"):
+            raw = upgraded.get(field, {})
+            if not isinstance(raw, dict) or any(
+                    not isinstance(key, str) or type(count) is not int or count < 0
+                    for key, count in raw.items()):
+                raise ValueError(f"{field} must contain non-negative integer counts")
+        return upgraded
+
+    @model_validator(mode="after")
+    def _validate_elapsed_alias(self) -> "TelemetrySummary":
+        if self.elapsed_ms != self.orchestration_elapsed_ms:
+            raise ValueError("elapsed_ms must equal orchestration_elapsed_ms")
+        return self
 
 
 class RedactionEvent(BaseModel):

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -175,7 +176,7 @@ def _create_legacy_database(tmp_path) -> str:
         )
         conn.execute(
             "INSERT INTO telemetry_summaries VALUES (?, ?, ?)",
-            ("legacy-task", '{"task_id": "legacy-task"}', created_at),
+            ("legacy-task", '{"task_id": "legacy-task", "elapsed_ms": 37}', created_at),
         )
         conn.execute(
             "INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -233,6 +234,7 @@ def test_new_database_records_all_bundled_migrations(tmp_path):
         "002_review_lifecycle",
         "003_request_identity",
         "004_review_telemetry",
+        "005_review_telemetry_summary",
     ]
 
 
@@ -335,6 +337,16 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
         } <= _column_names(conn, "review_tasks")
         assert {"request_id", "failure_kind"} <= _column_names(conn, "sandbox_runs")
         assert {"request_id", "error_kind"} <= _column_names(conn, "filter_intercepts")
+        assert {
+            "task_failure_kind",
+            "orchestration_elapsed_ms",
+            "sandbox_elapsed_ms",
+            "tool_attempts_count",
+            "tool_executed_count",
+            "severity_distribution_json",
+            "exception_kind_distribution_json",
+            "output_limit_exceeded_count",
+        } <= _column_names(conn, "telemetry_summaries")
         for table in task_owned_tables:
             assert _foreign_key(conn, table, "task_id") == ("review_tasks", "CASCADE")
             assert _index_exists(conn, table, ["task_id"])
@@ -358,6 +370,8 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
         run_row = conn.exec_driver_sql(
             "SELECT request_id, failure_kind, stdout, output_file_count FROM sandbox_runs").one()
         decision_row = conn.exec_driver_sql("SELECT request_id, error_kind, reason FROM filter_intercepts").one()
+        telemetry_row = conn.exec_driver_sql(
+            "SELECT orchestration_elapsed_ms, metrics_json FROM telemetry_summaries").one()
         assert task_row == ("2026-07-10T00:00:00+00:00", "", "")
         assert run_row == ("legacy:legacy-run", "", "legacy stdout", 1)
         assert decision_row == (
@@ -365,6 +379,8 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
             "policy_denied",
             "legacy policy denial",
         )
+        assert telemetry_row[0] == 37
+        assert json.loads(telemetry_row[1])["orchestration_elapsed_ms"] == 37
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
     repeated = ReviewStorage(db_url)
@@ -375,9 +391,53 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
             ("002_review_lifecycle", 1),
             ("003_request_identity", 1),
             ("004_review_telemetry", 1),
+            ("005_review_telemetry_summary", 1),
         ]
         assert conn.exec_driver_sql("SELECT count(*) FROM sandbox_runs").scalar_one() == 1
         assert conn.exec_driver_sql("SELECT count(*) FROM filter_intercepts").scalar_one() == 1
+
+
+@pytest.mark.parametrize("legacy_metrics", [
+    "not-json",
+    "[]",
+    "42",
+    json.dumps({
+        "elapsed_ms": "oops",
+        "sandbox_elapsed_ms": -1,
+        "tool_attempts_count": -2,
+        "tool_executed_count": True,
+        "task_failure_kind": {},
+        "severity_distribution": {"high": -1},
+        "exception_kind_distribution": {"runtime_unavailable": False},
+        "output_limit_exceeded_count": "many",
+    }),
+])
+def test_telemetry_summary_migration_runs_after_applied_004_and_normalizes_invalid_json(
+        tmp_path, legacy_metrics):
+    db_url = _create_legacy_database(tmp_path)
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        for version in ("002_review_lifecycle", "003_request_identity", "004_review_telemetry"):
+            conn.executescript((MIGRATIONS_DIR / f"{version}.sql").read_text(encoding="utf-8"))
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version, ))
+        conn.execute("UPDATE telemetry_summaries SET metrics_json = ?", (legacy_metrics, ))
+
+    storage = ReviewStorage(db_url)
+    with storage.engine.connect() as conn:
+        versions = conn.exec_driver_sql(
+            "SELECT version FROM schema_migrations ORDER BY version").scalars().all()
+        row = conn.exec_driver_sql(
+            "SELECT task_failure_kind, orchestration_elapsed_ms, "
+            "severity_distribution_json, metrics_json FROM telemetry_summaries").one()
+
+    assert versions[-2:] == ["004_review_telemetry", "005_review_telemetry_summary"]
+    assert row[:3] == ("", 0, "{}")
+    metrics = json.loads(row.metrics_json)
+    assert metrics["task_failure_kind"] == ""
+    assert metrics["severity_distribution"] == {}
+    assert metrics["exception_kind_distribution"] == {}
+    assert metrics["tool_attempts_count"] == 0
+    assert metrics["output_limit_exceeded_count"] == 0
 
 
 def test_request_identity_migration_backfills_only_empty_ids_and_preserves_audit_fields(tmp_path):
@@ -435,6 +495,7 @@ def test_request_identity_migration_backfills_only_empty_ids_and_preserves_audit
         ("002_review_lifecycle", 1),
         ("003_request_identity", 1),
         ("004_review_telemetry", 1),
+        ("005_review_telemetry_summary", 1),
     ]
 
 
@@ -567,6 +628,15 @@ def test_storage_roundtrip_by_task_id(tmp_path):
         TelemetrySummary(
             task_id=task.task_id,
             task_status=ReviewTaskStatus.COMPLETED,
+            task_failure_kind="storage_error",
+            orchestration_elapsed_ms=91,
+            elapsed_ms=91,
+            sandbox_elapsed_ms=17,
+            tool_attempts_count=3,
+            tool_executed_count=2,
+            severity_distribution={"high": 1},
+            exception_kind_distribution={"storage_error": 1},
+            output_limit_exceeded_count=1,
             findings_count=1,
         ))
 
@@ -582,6 +652,15 @@ def test_storage_roundtrip_by_task_id(tmp_path):
     assert rows["sandbox_runs"][0]["stdout_bytes_observed"] == 8192
     assert rows["sandbox_runs"][0]["stderr_bytes_observed"] == 17
     assert rows["sandbox_runs"][0]["output_bytes_observed"] == 4096
+    telemetry = rows["telemetry_summaries"][0]
+    assert telemetry["task_failure_kind"] == "storage_error"
+    assert telemetry["orchestration_elapsed_ms"] == 91
+    assert telemetry["sandbox_elapsed_ms"] == 17
+    assert telemetry["tool_attempts_count"] == 3
+    assert telemetry["tool_executed_count"] == 2
+    assert json.loads(telemetry["severity_distribution_json"]) == {"high": 1}
+    assert json.loads(telemetry["exception_kind_distribution_json"]) == {"storage_error": 1}
+    assert telemetry["output_limit_exceeded_count"] == 1
     assert "redacted evidence" in storage.dump_task_text(task.task_id)
 
 

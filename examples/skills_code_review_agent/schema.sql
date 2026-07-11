@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS filter_intercepts (
 
 CREATE TABLE IF NOT EXISTS telemetry_summaries (
     task_id VARCHAR(128) PRIMARY KEY,
+    task_failure_kind VARCHAR(64) NOT NULL DEFAULT '',
+    orchestration_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+    sandbox_elapsed_ms INTEGER NOT NULL DEFAULT 0,
+    tool_attempts_count INTEGER NOT NULL DEFAULT 0,
+    tool_executed_count INTEGER NOT NULL DEFAULT 0,
+    severity_distribution_json TEXT NOT NULL DEFAULT '{}',
+    exception_kind_distribution_json TEXT NOT NULL DEFAULT '{}',
+    output_limit_exceeded_count INTEGER NOT NULL DEFAULT 0,
     metrics_json TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL,
     FOREIGN KEY (task_id) REFERENCES review_tasks(task_id) ON DELETE CASCADE
