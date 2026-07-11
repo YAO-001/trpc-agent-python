@@ -169,7 +169,10 @@ class TestBuildCodeFiles:
             return b"", 0
 
         await BaseWorkspaceFS._build_code_files(
-            "/ws", ["/ws/a"], fetcher, max_read_size=7,
+            "/ws",
+            ["/ws/a"],
+            fetcher,
+            max_read_size=7,
         )
         assert seen_caps == [7]
 
@@ -218,6 +221,8 @@ class TestBuildManifestOutput:
         ref = manifest.files[0]
         assert ref.name == "a.txt"
         assert ref.content == "alpha"
+        assert ref.size_bytes == 5
+        assert ref.truncated is False
         assert ref.saved_as == ""
         assert ref.version == 0
         assert manifest.limits_hit is False
@@ -240,6 +245,8 @@ class TestBuildManifestOutput:
         assert [s[0] for s in ctx.saved] == ["run-1/a.txt", "run-1/b.txt"]
         assert manifest.files[0].saved_as == "run-1/a.txt"
         assert manifest.files[0].version == 1
+        assert manifest.files[0].size_bytes == 5
+        assert manifest.files[0].truncated is False
 
     async def test_save_without_ctx_raises(self):
         spec = WorkspaceOutputSpec(globs=["**/*"], save=True)
@@ -331,6 +338,8 @@ class TestBuildManifestOutput:
         )
         assert manifest.limits_hit is True
         assert manifest.files[0].content == "ab"
+        assert manifest.files[0].size_bytes == 6
+        assert manifest.files[0].truncated is True
 
     async def test_strict_truncated_save_raises(self):
         # strict_truncated_save is the container's "refuse to persist a
@@ -367,6 +376,8 @@ class TestBuildManifestOutput:
         assert names == ["big.bin"]
         assert ctx.saved[0][1] == b"01"
         assert manifest.limits_hit is True
+        assert manifest.files[0].size_bytes == 10
+        assert manifest.files[0].truncated is True
 
     async def test_fetcher_failure_emits_sentinel_and_continues(self):
         # Mirrors _build_code_files behaviour: a single failing fetch
@@ -430,12 +441,16 @@ async def test_subclass_can_override_build_code_files():
         # Concrete stubs for the abstract methods so we can instantiate.
         async def put_files(self, ws, files, ctx=None):  # pragma: no cover
             return None
+
         async def stage_directory(self, ws, src, dst, opt, ctx=None):  # pragma: no cover
             return None
+
         async def collect(self, ws, patterns, ctx=None):  # pragma: no cover
             return []
+
         async def stage_inputs(self, ws, specs, ctx=None):  # pragma: no cover
             return None
+
         async def collect_outputs(self, ws, spec, ctx=None):  # pragma: no cover
             from trpc_agent_sdk.code_executors._types import ManifestOutput
             return ManifestOutput()
@@ -446,12 +461,17 @@ async def test_subclass_can_override_build_code_files():
         async def _build_code_files(ws_path, matches, fetcher, *, max_read_size=_base.MAX_READ_SIZE_BYTES):
             _CountingFS.invocation_count += 1
             return await BaseWorkspaceFS._build_code_files(
-                ws_path, matches, fetcher, max_read_size=max_read_size,
+                ws_path,
+                matches,
+                fetcher,
+                max_read_size=max_read_size,
             )
 
     fs = _CountingFS()
     files = await fs._build_code_files(
-        "/ws", ["/ws/a.txt"], _make_fetcher({"/ws/a.txt": b"hi"}),
+        "/ws",
+        ["/ws/a.txt"],
+        _make_fetcher({"/ws/a.txt": b"hi"}),
     )
     assert _CountingFS.invocation_count == 1
     assert [f.name for f in files] == ["a.txt"]

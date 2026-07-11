@@ -43,12 +43,30 @@ def create_skill_tool_set(runtime: str = "container"):
         workspace_runtime = create_local_workspace_runtime(read_only_staged_skill=True)
     else:
         workspace_runtime = create_container_workspace_runtime()
-    repository = FsSkillRepository(str(EXAMPLE_DIR / "skills"), workspace_runtime=workspace_runtime)
-    return SkillToolSet(
-        repository=repository,
-        allowed_cmds=["python3"],
-        skill_stager=CopySkillStager() if runtime == "container" else None,
-    )
+    try:
+        repository = FsSkillRepository(str(EXAMPLE_DIR / "skills"), workspace_runtime=workspace_runtime)
+        return SkillToolSet(
+            repository=repository,
+            allowed_cmds=["python3"],
+            skill_stager=CopySkillStager() if runtime == "container" else None,
+        )
+    except Exception:
+        workspace_runtime.close()
+        raise
+
+
+@contextmanager
+def create_owned_skill_tool_set(runtime: str = "container"):
+    """Create a tool set whose workspace runtime has explicit ownership."""
+    tool_set = create_skill_tool_set(runtime)
+    repository = getattr(tool_set, "repository", None)
+    workspace_runtime = getattr(repository, "workspace_runtime", None)
+    try:
+        yield tool_set
+    finally:
+        close = getattr(workspace_runtime, "close", None)
+        if callable(close):
+            close()
 
 
 def _input_specs(input_path: str | None, *, workspace_path: str) -> list[dict[str, Any]]:

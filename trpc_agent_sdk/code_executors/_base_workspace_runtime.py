@@ -271,7 +271,7 @@ class BaseWorkspaceFS(ABC):
             count += 1
 
             mime = detect_content_type(full_path, data)
-            file_ref = ManifestFileRef(name=rel, mime_type=mime)
+            file_ref = ManifestFileRef(name=rel, mime_type=mime, size_bytes=raw_size, truncated=truncated)
 
             if spec.inline:
                 file_ref.content = data.decode("utf-8", errors="replace")
@@ -415,6 +415,9 @@ class BaseWorkspaceRuntime(ABC):
     """
     Base class for workspace runtime implementations.
     """
+
+    def close(self) -> None:
+        """Release runtime-owned resources; stateless runtimes are no-ops."""
 
     @abstractmethod
     def manager(self, ctx: Optional[InvocationContext] = None) -> BaseWorkspaceManager:

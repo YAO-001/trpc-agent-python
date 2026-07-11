@@ -263,8 +263,7 @@ def _validated_returned_run(
         and value.termination_confirmed
         and (value.stdout_bytes_observed > MAX_STDOUT_CHARS or value.stderr_bytes_observed > MAX_STDERR_CHARS
              or value.output_bytes_observed > min(request.output_budget_bytes, request.output_spec.max_total_bytes)))
-    orchestration_evidence = (value.termination_reason == "orchestration_error" and value.execution_started
-                              and value.exit_code != 0)
+    orchestration_evidence = value.termination_reason == "orchestration_error" and value.exit_code != 0
     if orchestration_evidence:
         payload["failure_kind"] = "orchestration_error"
         payload["termination_reason"] = "orchestration_error"
@@ -304,6 +303,9 @@ class LocalSkillHarness:
         self.skill_dir = skill_dir
         self.boundary = boundary or RedactionBoundary(redactor=redactor)
         self.redactor = self.boundary.redactor
+
+    def close(self) -> None:
+        """Local execution owns no persistent runtime resources."""
 
     def execute_one(
         self,
@@ -458,6 +460,26 @@ class TrpcSkillToolSetHarness:
         self.policy = policy
         self.boundary = boundary or RedactionBoundary(redactor=redactor)
         self.redactor = self.boundary.redactor
+        self._tool_set_context = None
+        self._tool_set = None
+        self._closed = False
+
+    def _ensure_tool_set(self):
+        if self._tool_set is None:
+            from .agent_factory import create_owned_skill_tool_set
+            context = create_owned_skill_tool_set(self.runtime)
+            tool_set = context.__enter__()
+            self._tool_set_context = context
+            self._tool_set = tool_set
+        return self._tool_set
+
+    def close(self) -> None:
+        """Close the shared workspace runtime exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._tool_set_context is not None:
+            self._tool_set_context.__exit__(None, None, None)
 
     def execute_one(
         self,
@@ -491,7 +513,6 @@ class TrpcSkillToolSetHarness:
         from trpc_agent_sdk.context import set_invocation_ctx
         from trpc_agent_sdk.sessions import InMemorySessionService
 
-        from .agent_factory import create_skill_tool_set
         from .agent_factory import make_review_before_tool_callback
 
         canonical_args = request.to_skill_run_args()
@@ -513,7 +534,7 @@ class TrpcSkillToolSetHarness:
                 if False:
                     yield parent_context
 
-        tool_set = create_skill_tool_set(runtime=self.runtime)
+        tool_set = self._ensure_tool_set()
         service = InMemorySessionService()
         session = await service.create_session(
             app_name="skills_code_review_agent",
@@ -573,35 +594,68 @@ class TrpcSkillToolSetHarness:
             max_file_bytes=max_file_bytes,
             max_total_bytes=min(request.output_budget_bytes, request.output_spec.max_total_bytes),
         )
-        stdout, stdout_truncated = _sanitize_stream(
+        stdout, sanitized_stdout_truncated = _sanitize_stream(
             output.get("stdout") or "",
             boundary=self.boundary,
             limit=MAX_STDOUT_CHARS,
         )
-        stderr, stderr_truncated = _sanitize_stream(
+        stderr, sanitized_stderr_truncated = _sanitize_stream(
             output.get("stderr") or "",
             boundary=self.boundary,
             limit=MAX_STDERR_CHARS,
         )
+        stdout_truncated = bool(output.get("stdout_truncated")) or sanitized_stdout_truncated
+        stderr_truncated = bool(output.get("stderr_truncated")) or sanitized_stderr_truncated
         warning = "; ".join(self.boundary.text(item).text for item in output.get("warnings", []) or [])
         payload = self.boundary.clean({
-            "run_id": "sandbox_" + request.request_id.replace(":", "_"),
-            "task_id": request.task_id,
-            "request_id": request.request_id,
-            "runtime": request.runtime,
-            "command": list(request.command_argv),
-            "decision": "allow",
-            "exit_code": int(output.get("exit_code") or 0),
-            "timed_out": bool(output.get("timed_out")),
-            "duration_ms": 0 if dry_run else int(output.get("duration_ms") or 0),
-            "stdout": stdout,
-            "stderr": stderr,
-            "output_files": output_map,
-            "stdout_truncated": stdout_truncated,
-            "stderr_truncated": stderr_truncated,
-            "output_truncated": output_truncated,
-            "warning": warning,
-            "created_at": utc_now(dry_run),
+            "run_id":
+            "sandbox_" + request.request_id.replace(":", "_"),
+            "task_id":
+            request.task_id,
+            "request_id":
+            request.request_id,
+            "runtime":
+            request.runtime,
+            "command":
+            list(request.command_argv),
+            "decision":
+            "allow",
+            "exit_code":
+            int(output.get("exit_code") or 0),
+            "timed_out":
+            bool(output.get("timed_out")),
+            "duration_ms":
+            0 if dry_run else int(output.get("duration_ms") or 0),
+            "stdout":
+            stdout,
+            "stderr":
+            stderr,
+            "output_files":
+            output_map,
+            "stdout_truncated":
+            stdout_truncated,
+            "stderr_truncated":
+            stderr_truncated,
+            "output_truncated":
+            output_truncated,
+            "stdout_bytes_observed":
+            int(output.get("stdout_bytes_observed") or 0),
+            "stderr_bytes_observed":
+            int(output.get("stderr_bytes_observed") or 0),
+            "output_bytes_observed":
+            sum(int(item.get("size_bytes") or 0) for item in output.get("output_files", []) or []),
+            "execution_started":
+            bool(output.get("execution_started")),
+            "failure_kind":
+            str(output.get("failure_kind") or ""),
+            "termination_confirmed":
+            bool(output.get("termination_confirmed", True)),
+            "termination_reason":
+            str(output.get("termination_reason") or ""),
+            "warning":
+            warning,
+            "created_at":
+            utc_now(dry_run),
         })
         return SandboxRun.model_validate(payload)
 
@@ -721,35 +775,48 @@ class SandboxRunner:
                 )
                 complete_run(failed_run)
         else:
-            for request in ordered_requests:
-                try:
-                    returned_run = harness.execute_one(
-                        task_id=task_id,
-                        review_input=safe_review_input,
-                        request=request,
-                        policy_context=policy_context,
-                        dry_run=dry_run,
-                    )
-                    safe_run = _validated_returned_run(
-                        returned_run,
-                        request,
-                        boundary=self.boundary,
-                    )
-                except Exception as exc:  # pylint: disable=broad-except
-                    needs_human_review.append(
-                        _runtime_warning(
-                            f"{effective_runtime} runtime failed",
-                            f"SkillToolSet execution did not complete: {self.boundary.text(exc).text}",
+            try:
+                for request in ordered_requests:
+                    try:
+                        returned_run = harness.execute_one(
+                            task_id=task_id,
+                            review_input=safe_review_input,
+                            request=request,
+                            policy_context=policy_context,
+                            dry_run=dry_run,
+                        )
+                        safe_run = _validated_returned_run(
+                            returned_run,
+                            request,
                             boundary=self.boundary,
-                        ))
-                    safe_run = _failure_run(
-                        request,
-                        exc,
-                        failure_kind="orchestration_error",
-                        dry_run=dry_run,
-                        boundary=self.boundary,
-                    )
-                complete_run(safe_run)
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        needs_human_review.append(
+                            _runtime_warning(
+                                f"{effective_runtime} runtime failed",
+                                f"SkillToolSet execution did not complete: {self.boundary.text(exc).text}",
+                                boundary=self.boundary,
+                            ))
+                        safe_run = _failure_run(
+                            request,
+                            exc,
+                            failure_kind="orchestration_error",
+                            dry_run=dry_run,
+                            boundary=self.boundary,
+                        )
+                    complete_run(safe_run)
+            finally:
+                close = getattr(harness, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:  # pylint: disable=broad-except
+                        needs_human_review.append(
+                            _runtime_warning(
+                                f"{effective_runtime} runtime cleanup failed",
+                                f"SkillToolSet cleanup did not complete: {self.boundary.text(exc).text}",
+                                boundary=self.boundary,
+                            ))
 
         prepared_batches.append(
             normalizer.prepare(ReviewCandidates(

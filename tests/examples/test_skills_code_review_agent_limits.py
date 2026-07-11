@@ -29,6 +29,7 @@ from agent.process_limits import _finalize_capped_result
 from agent.process_limits import _scan_output_bytes
 from agent.redaction_boundary import RedactionBoundary
 from agent.sandbox_runner import SandboxRunner
+from agent.sandbox_runner import TrpcSkillToolSetHarness
 from agent.sandbox_runner import _read_output_file
 from agent.sandbox_runner import _run_capped_process
 from agent.sandbox_runner import _sanitize_stream
@@ -397,6 +398,49 @@ def test_clean_returned_run_clears_stale_failure_kind():
     assert safe.termination_reason == ""
 
 
+def test_container_harness_preserves_bounded_result_metadata():
+    review_input = {"task_id": "task-container-metadata", "fixture_names": []}
+    with prepare_execution_plan(task_id="task-container-metadata",
+                                runtime="container",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        request = plan.requests[0]
+        harness = TrpcSkillToolSetHarness(
+            runtime="container",
+            policy=ReviewExecutionPolicy(dry_run=True),
+            redactor=SecretRedactor(),
+        )
+        run = harness._run_from_skill_output(
+            request,
+            {
+                "stdout": "bounded",
+                "stderr": "",
+                "exit_code": 1,
+                "stdout_truncated": True,
+                "stdout_bytes_observed": 20000,
+                "execution_started": True,
+                "failure_kind": "output_limit_exceeded",
+                "termination_confirmed": True,
+                "termination_reason": "output_limit_exceeded",
+                "output_files": [{
+                    "name": "out/findings.json",
+                    "content": "{}",
+                    "size_bytes": 8192,
+                    "truncated": True,
+                }],
+            },
+            dry_run=True,
+        )
+
+    assert run.stdout_truncated is True
+    assert run.stdout_bytes_observed == 20000
+    assert run.output_truncated is True
+    assert run.output_bytes_observed == 8192
+    assert run.execution_started is True
+    assert run.failure_kind == "output_limit_exceeded"
+    assert run.termination_confirmed is True
+
+
 @pytest.mark.parametrize(
     ("run_updates", "expected_failure"),
     [
@@ -428,6 +472,7 @@ def test_clean_returned_run_clears_stale_failure_kind():
                 "exit_code": 1,
                 "termination_reason": "orchestration_error",
                 "termination_confirmed": False,
+                "execution_started": False,
                 "stdout_bytes_observed": 200000,
                 "failure_kind": "output_limit_exceeded",
             },
@@ -511,6 +556,68 @@ def test_output_limit_kills_process_before_late_marker(tmp_path):
     assert not marker.exists()
     pid = int(child_pid.read_text(encoding="utf-8"))
     assert not _pid_exists(pid)
+
+
+def test_runner_closes_harness_once_when_execute_raises(monkeypatch):
+    review_input = {"task_id": "task-close", "fixture_names": []}
+    runner = SandboxRunner(example_dir=EXAMPLE_DIR,
+                           policy=ReviewExecutionPolicy(dry_run=True),
+                           redactor=SecretRedactor())
+
+    class Harness:
+        close_calls = 0
+
+        def execute_one(self, **kwargs):
+            del kwargs
+            raise RuntimeError("synthetic execution failure")
+
+        def close(self):
+            self.close_calls += 1
+
+    harness = Harness()
+    with prepare_execution_plan(task_id="task-close",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        monkeypatch.setattr(runner, "_harness_for_runtime", lambda **kwargs: harness)
+        runner.run(task_id="task-close",
+                   review_input=review_input,
+                   runtime="local",
+                   dry_run=True,
+                   requests=[plan.requests[0]],
+                   policy_context=plan.policy_context)
+    assert harness.close_calls == 1
+
+
+def test_runner_reports_close_failure_without_masking_execution(monkeypatch):
+    review_input = {"task_id": "task-close-failure", "fixture_names": []}
+    runner = SandboxRunner(example_dir=EXAMPLE_DIR,
+                           policy=ReviewExecutionPolicy(dry_run=True),
+                           redactor=SecretRedactor())
+
+    class Harness:
+
+        def execute_one(self, **kwargs):
+            del kwargs
+            raise RuntimeError("synthetic execution failure")
+
+        def close(self):
+            raise RuntimeError("synthetic cleanup failure")
+
+    with prepare_execution_plan(task_id="task-close-failure",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        monkeypatch.setattr(runner, "_harness_for_runtime", lambda **kwargs: Harness())
+        result = runner.run(task_id="task-close-failure",
+                            review_input=review_input,
+                            runtime="local",
+                            dry_run=True,
+                            requests=[plan.requests[0]],
+                            policy_context=plan.policy_context)
+
+    assert result.runs[0].failure_kind == "orchestration_error"
+    assert any("cleanup failed" in warning.title for warning in result.candidates.needs_human_review)
 
 
 def test_timeout_kills_process_before_late_marker(tmp_path):

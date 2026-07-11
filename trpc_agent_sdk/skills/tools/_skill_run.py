@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import posixpath
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from typing import Dict
 from typing import List
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from trpc_agent_sdk.code_executors import BaseWorkspaceRuntime
 from trpc_agent_sdk.code_executors import CodeFile
+from trpc_agent_sdk.code_executors import DEFAULT_MAX_TOTAL_BYTES
 from trpc_agent_sdk.code_executors import DIR_OUT
 from trpc_agent_sdk.code_executors import DIR_SKILLS
 from trpc_agent_sdk.code_executors import DIR_WORK
@@ -31,6 +33,7 @@ from trpc_agent_sdk.code_executors import WorkspaceOutputSpec
 from trpc_agent_sdk.code_executors import WorkspacePutFileInfo
 from trpc_agent_sdk.code_executors import WorkspaceRunProgramSpec
 from trpc_agent_sdk.code_executors import WorkspaceRunResult
+from trpc_agent_sdk.code_executors.utils import normalize_globs
 from trpc_agent_sdk.context import InvocationContext
 from trpc_agent_sdk.filter import BaseFilter
 from trpc_agent_sdk.log import logger
@@ -146,6 +149,21 @@ def _truncate_output(s: str) -> tuple[str, bool]:
 
 def _workspace_ref(name: str) -> str:
     return f"workspace://{name}" if name else ""
+
+
+def _resolve_output_globs(workspace_path: str, patterns: list[str]) -> list[str]:
+    """Resolve declarative output globs without allowing workspace escape."""
+    resolved = []
+    workspace_root = posixpath.normpath(workspace_path)
+    for pattern in normalize_globs(patterns):
+        relative = PurePosixPath(pattern)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("output glob must remain inside the workspace")
+        absolute = posixpath.normpath(posixpath.join(workspace_root, relative.as_posix()))
+        if posixpath.commonpath([workspace_root, absolute]) != workspace_root:
+            raise ValueError("output glob must remain inside the workspace")
+        resolved.append(absolute)
+    return resolved
 
 
 def _normalize_input_dst(dst: str) -> str:
@@ -362,6 +380,14 @@ class SkillRunOutput(BaseModel):
         default_factory=list,
         description="Non-fatal warnings about truncation, persistence, or empty outputs",
     )
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_bytes_observed: int = 0
+    stderr_bytes_observed: int = 0
+    execution_started: bool = False
+    failure_kind: str = ""
+    termination_confirmed: bool = True
+    termination_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -710,11 +736,17 @@ class SkillRunTool(BaseTool):
 
         # Truncate stdout/stderr
         warnings: list[str] = []
-        stdout, trunc = _truncate_output(result.stdout)
-        if trunc:
+        if result.limits_applied:
+            stdout, stdout_truncated = result.stdout, result.stdout_truncated
+        else:
+            stdout, stdout_truncated = _truncate_output(result.stdout)
+        if stdout_truncated:
             warnings.append(_WARN_STDOUT_TRUNCATED)
-        stderr, trunc = _truncate_output(result.stderr)
-        if trunc:
+        if result.limits_applied:
+            stderr, stderr_truncated = result.stderr, result.stderr_truncated
+        else:
+            stderr, stderr_truncated = _truncate_output(result.stderr)
+        if stderr_truncated:
             warnings.append(_WARN_STDERR_TRUNCATED)
 
         # Filter empty files on failure
@@ -733,6 +765,14 @@ class SkillRunTool(BaseTool):
             output_files=files,
             primary_output=primary,
             warnings=warnings,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+            stdout_bytes_observed=result.stdout_bytes_observed,
+            stderr_bytes_observed=result.stderr_bytes_observed,
+            execution_started=result.execution_started,
+            failure_kind=result.failure_kind,
+            termination_confirmed=result.termination_confirmed,
+            termination_reason=result.termination_reason,
         )
 
         await self._attach_artifacts_if_requested(tool_context, ws, inputs, output, files)
@@ -792,6 +832,9 @@ class SkillRunTool(BaseTool):
         cmd, cmd_args = self._build_command(input_data.command, ws.path, cwd)
 
         runner = workspace_runtime.runner(ctx)
+        output_spec = input_data.outputs
+        budget = output_spec.max_total_bytes if output_spec and output_spec.max_total_bytes else DEFAULT_MAX_TOTAL_BYTES
+        output_globs = _resolve_output_globs(ws.path, output_spec.globs if output_spec else [])
         ret = await runner.run_program(
             ws,
             WorkspaceRunProgramSpec(
@@ -801,6 +844,10 @@ class SkillRunTool(BaseTool):
                 cwd=cwd,
                 stdin=input_data.stdin,
                 timeout=timeout,
+                stdout_limit_bytes=_MAX_OUTPUT_CHARS,
+                stderr_limit_bytes=_MAX_OUTPUT_CHARS,
+                output_globs=output_globs,
+                output_limit_bytes=budget,
             ),
             ctx,
         )

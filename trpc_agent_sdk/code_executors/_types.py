@@ -151,6 +151,11 @@ class WorkspaceRunProgramSpec(BaseModel):
     tty: bool = Field(default=False, description="Allocate pseudo-TTY")
     """ whether to allocate pseudo-TTY"""
 
+    stdout_limit_bytes: int = 0
+    stderr_limit_bytes: int = 0
+    output_globs: list[str] = Field(default_factory=list)
+    output_limit_bytes: int = 0
+
 
 class WorkspaceRunResult(BaseModel):
     """
@@ -171,6 +176,16 @@ class WorkspaceRunResult(BaseModel):
 
     timed_out: bool = False
     """ whether timed out"""
+
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_bytes_observed: int = 0
+    stderr_bytes_observed: int = 0
+    execution_started: bool = False
+    failure_kind: str = ""
+    termination_confirmed: bool = True
+    termination_reason: str = ""
+    limits_applied: bool = False
 
 
 class WorkspaceStageOptions(BaseModel):
@@ -286,6 +301,9 @@ class ManifestFileRef(BaseModel):
 
     version: int = 0
     """ version"""
+
+    size_bytes: int = 0
+    truncated: bool = False
 
 
 class ManifestOutput(BaseModel):

@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from unittest.mock import MagicMock, Mock, patch
+import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,9 +27,8 @@ from trpc_agent_sdk.code_executors.container._container_cli import (
     CommandArgs,
     ContainerClient,
     ContainerConfig,
+    ContainerExecResult,
 )
-from trpc_agent_sdk.utils import CommandExecResult
-
 
 # ---------------------------------------------------------------------------
 # ContainerConfig
@@ -140,7 +140,7 @@ class TestContainerClientInitDockerClient:
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
     def test_docker_exception_connection_error(self, mock_docker, mock_atexit):
-        exc_cls = type("DockerException", (Exception,), {})
+        exc_cls = type("DockerException", (Exception, ), {})
         mock_docker.errors.DockerException = exc_cls
         mock_docker.from_env.side_effect = exc_cls("Connection refused")
 
@@ -150,7 +150,7 @@ class TestContainerClientInitDockerClient:
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
     def test_docker_exception_socket_error(self, mock_docker, mock_atexit):
-        exc_cls = type("DockerException", (Exception,), {})
+        exc_cls = type("DockerException", (Exception, ), {})
         mock_docker.errors.DockerException = exc_cls
         mock_docker.from_env.side_effect = exc_cls("No such file or directory")
 
@@ -160,7 +160,7 @@ class TestContainerClientInitDockerClient:
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
     def test_docker_exception_generic(self, mock_docker, mock_atexit):
-        exc_cls = type("DockerException", (Exception,), {})
+        exc_cls = type("DockerException", (Exception, ), {})
         mock_docker.errors.DockerException = exc_cls
         mock_docker.from_env.side_effect = exc_cls("some other error")
 
@@ -170,7 +170,7 @@ class TestContainerClientInitDockerClient:
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
     def test_unexpected_exception(self, mock_docker, mock_atexit):
-        mock_docker.errors.DockerException = type("DockerException", (Exception,), {})
+        mock_docker.errors.DockerException = type("DockerException", (Exception, ), {})
         mock_docker.from_env.side_effect = OSError("unexpected")
 
         with pytest.raises(RuntimeError, match="Unexpected error initializing Docker client"):
@@ -183,6 +183,22 @@ class TestContainerClientInitDockerClient:
 
 
 class TestContainerClientInitContainer:
+
+    def test_constructor_cleans_container_when_verification_fails(self):
+        container = MagicMock()
+        container.id = "failed-container"
+
+        def fail_after_start(client):
+            client._container = container
+            raise ValueError("python3 is not installed")
+
+        with patch.object(ContainerClient, "_init_docker_client"), patch.object(ContainerClient, "_init_container",
+                                                                                fail_after_start):
+            with pytest.raises(ValueError, match="python3"):
+                ContainerClient(ContainerConfig())
+
+        container.stop.assert_called_once_with()
+        container.remove.assert_called_once_with()
 
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
@@ -220,7 +236,7 @@ class TestContainerClientInitContainer:
         mock_client.containers.run.return_value = mock_container
 
         cfg = ContainerConfig(host_config={"Binds": ["/host/skills:/opt/skills:ro"]})
-        cc = ContainerClient(config=cfg)
+        ContainerClient(config=cfg)
 
         mock_client.containers.run.assert_called_once_with(
             image=DEFAULT_IMAGE_TAG,
@@ -285,10 +301,9 @@ class TestContainerClientBuildDockerImage:
 
         docker_dir = str(tmp_path)
         cfg = ContainerConfig(docker_path=docker_dir, image="custom:latest")
-        cc = ContainerClient(config=cfg)
+        ContainerClient(config=cfg)
 
-        mock_client.images.build.assert_called_once_with(
-            path=os.path.abspath(docker_dir), tag="custom:latest", rm=True)
+        mock_client.images.build.assert_called_once_with(path=os.path.abspath(docker_dir), tag="custom:latest", rm=True)
 
     @patch("trpc_agent_sdk.code_executors.container._container_cli.atexit")
     @patch("trpc_agent_sdk.code_executors.container._container_cli.docker")
@@ -298,8 +313,7 @@ class TestContainerClientBuildDockerImage:
         mock_docker.errors.DockerException = Exception
 
         with pytest.raises(FileNotFoundError, match="Invalid Docker path"):
-            ContainerClient(config=ContainerConfig(
-                docker_path="/nonexistent/docker/path", image="custom:latest"))
+            ContainerClient(config=ContainerConfig(docker_path="/nonexistent/docker/path", image="custom:latest"))
 
     def test_build_image_no_docker_path(self):
         cc = ContainerClient.__new__(ContainerClient)
@@ -317,20 +331,54 @@ class TestContainerClientBuildDockerImage:
 
 class TestContainerClientCleanup:
 
+    def test_close_is_idempotent_and_unregisters_atexit(self):
+        cc = ContainerClient.__new__(ContainerClient)
+        container = MagicMock()
+        container.id = "owned-container"
+        cc._container = container
+        cc._closed = False
+
+        with patch("trpc_agent_sdk.code_executors.container._container_cli.atexit.unregister") as unregister:
+            cc.close()
+            cc.close()
+
+        container.stop.assert_called_once_with()
+        container.remove.assert_called_once_with()
+        unregister.assert_called_once()
+        assert cc._container is None
+
     def test_cleanup_with_container(self):
         cc = ContainerClient.__new__(ContainerClient)
-        cc._container = MagicMock()
+        container = MagicMock()
+        cc._container = container
 
         cc._cleanup_container()
 
-        cc._container.stop.assert_called_once()
-        cc._container.remove.assert_called_once()
+        container.stop.assert_called_once()
+        container.remove.assert_called_once()
+        assert cc._container is None
 
     def test_cleanup_without_container(self):
         cc = ContainerClient.__new__(ContainerClient)
         cc._container = None
 
         cc._cleanup_container()
+
+    def test_close_failure_keeps_handle_for_retry(self):
+        cc = ContainerClient.__new__(ContainerClient)
+        container = MagicMock()
+        container.stop.side_effect = [RuntimeError("stop failed"), None]
+        cc._container = container
+        cc._closed = False
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            cc.close()
+
+        assert cc._container is container
+        assert cc._closed is False
+        cc.close()
+        assert cc._container is None
+        assert container.stop.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +397,7 @@ class TestContainerClientExecRun:
         args = CommandArgs(environment={"KEY": "VAL"}, timeout=None)
         result = await cc.exec_run(cmd=["echo", "hello"], command_args=args)
 
-        assert isinstance(result, CommandExecResult)
+        assert isinstance(result, ContainerExecResult)
         assert result.stdout == "hello"
         assert result.stderr == ""
         assert result.exit_code == 0
@@ -384,23 +432,22 @@ class TestContainerClientExecRun:
     async def test_exec_run_timeout_error(self):
         cc = ContainerClient.__new__(ContainerClient)
         mock_container = MagicMock()
-
-        async def _slow_exec(*args, **kwargs):
-            await asyncio.sleep(10)
-
-        mock_container.exec_run.side_effect = lambda **kw: asyncio.sleep(100)
         cc._container = mock_container
+        release = threading.Event()
+
+        def slow_exec(cmd, command_args, state):
+            del cmd, command_args
+            state.update(exec_id="exec-timeout", low_level_started=True)
+            release.wait(timeout=5)
+            return ContainerExecResult("", "", -1, False)
+
+        cc._stream_exec = slow_exec
+        cc._terminate_exec_group = lambda pid_file: False
+        cc._kill_container = lambda: release.set() or True
+        cc._exec_stopped = lambda exec_id: exec_id == "exec-timeout"
 
         args = CommandArgs(timeout=0.01)
-
-        loop = asyncio.get_event_loop()
-        original_run_in_executor = loop.run_in_executor
-
-        async def mock_run_in_executor(executor, func):
-            await asyncio.sleep(10)
-
-        with patch.object(loop, 'run_in_executor', side_effect=mock_run_in_executor):
-            result = await cc.exec_run(cmd=["sleep", "100"], command_args=args)
+        result = await cc.exec_run(cmd=["sleep", "100"], command_args=args)
 
         assert result.exit_code == -1
         assert result.is_timeout is True

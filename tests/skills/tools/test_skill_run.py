@@ -26,6 +26,7 @@ from trpc_agent_sdk.skills.tools._skill_run import SkillRunTool
 from trpc_agent_sdk.skills.tools._skill_run import _build_editor_wrapper_script
 from trpc_agent_sdk.skills.tools._skill_run import _filter_failed_empty_outputs
 from trpc_agent_sdk.skills.tools._skill_run import _is_text_mime
+from trpc_agent_sdk.skills.tools._skill_run import _resolve_output_globs
 from trpc_agent_sdk.skills.tools._skill_run import _select_primary_output
 from trpc_agent_sdk.skills.tools._skill_run import _should_inline_file_content
 from trpc_agent_sdk.skills.tools._skill_run import _split_command_line
@@ -68,6 +69,13 @@ class TestModuleHelpers:
     def test_workspace_ref(self):
         assert _workspace_ref("a.txt") == "workspace://a.txt"
 
+    def test_resolve_output_globs_stays_inside_workspace(self):
+        assert _resolve_output_globs("/workspace/id", ["$OUTPUT_DIR/*.json"]) == ["/workspace/id/out/*.json"]
+        with pytest.raises(ValueError, match="inside the workspace"):
+            _resolve_output_globs("/workspace/id", ["../outside/**"])
+        with pytest.raises(ValueError, match="inside the workspace"):
+            _resolve_output_globs("/workspace/id", ["/etc/**"])
+
     def test_filter_failed_empty_outputs(self):
         files = [SkillRunFile(name="a.txt", content="", size_bytes=0)]
         kept, warns = _filter_failed_empty_outputs(1, False, files)
@@ -98,10 +106,20 @@ class TestModels:
 
     def test_run_models(self):
         inp = SkillRunInput(skill="s", command="echo hi")
-        out = SkillRunOutput()
+        out = SkillRunOutput(
+            stdout_truncated=True,
+            stdout_bytes_observed=20,
+            execution_started=True,
+            failure_kind="output_limit_exceeded",
+            termination_reason="output_limit_exceeded",
+        )
         art = ArtifactInfo(name="a.txt", version=1)
         assert inp.skill == "s"
         assert out.exit_code == 0
+        assert out.stdout_truncated is True
+        assert out.stdout_bytes_observed == 20
+        assert out.execution_started is True
+        assert out.failure_kind == "output_limit_exceeded"
         assert art.version == 1
 
 

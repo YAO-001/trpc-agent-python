@@ -75,6 +75,45 @@ from ._container_cli import ContainerClient
 from ._container_cli import ContainerConfig
 
 
+class _IteratorReader(io.RawIOBase):
+    """Expose a Docker response iterator as a streaming binary file."""
+
+    def __init__(self, chunks):
+        super().__init__()
+        self._chunks = chunks
+        self._iterator = iter(chunks)
+        self._pending = memoryview(b"")
+        self._source_closed = False
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        target = memoryview(buffer)
+        written = 0
+        while written < len(target):
+            if not self._pending:
+                try:
+                    self._pending = memoryview(next(self._iterator))
+                except StopIteration:
+                    break
+            take = min(len(target) - written, len(self._pending))
+            target[written:written + take] = self._pending[:take]
+            self._pending = self._pending[take:]
+            written += take
+        return written
+
+    def close(self):
+        try:
+            if not self._source_closed:
+                self._source_closed = True
+                close = getattr(self._chunks, "close", None)
+                if callable(close):
+                    close()
+        finally:
+            super().close()
+
+
 @dataclass
 class RuntimeConfig:
     """
@@ -638,14 +677,16 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         Raises:
             RuntimeError: If copy fails
         """
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+            raise ValueError("max_bytes must be a non-negative integer")
         try:
             stream, _ = self.container.client.api.get_archive(self.container.container.id, full_path)
-            tar_stream = io.BytesIO(b''.join(stream))
-
-            with tarfile.open(fileobj=tar_stream, mode='r') as tar:
-                for member in tar.getmembers():
+            with io.BufferedReader(_IteratorReader(stream)) as reader, tarfile.open(fileobj=reader, mode='r|*') as tar:
+                for member in tar:
                     if member.isfile():
                         f = tar.extractfile(member)
+                        if f is None:
+                            continue
                         data = f.read(max_bytes)
                         mime = self._detect_mime_type(data)
                         return data, member.size, mime
@@ -856,13 +897,26 @@ class ContainerProgramRunner(BaseProgramRunner):
             environment=None,
             timeout=timeout,
             stdin=spec.stdin or None,
+            stdout_limit_bytes=spec.stdout_limit_bytes,
+            stderr_limit_bytes=spec.stderr_limit_bytes,
+            output_globs=tuple(spec.output_globs),
+            output_limit_bytes=spec.output_limit_bytes,
         )
         result = await self.container.exec_run(cmd=cmd, command_args=command_args)
         return WorkspaceRunResult(stdout=result.stdout,
                                   stderr=result.stderr,
                                   exit_code=result.exit_code,
                                   duration=time.time() - start_time,
-                                  timed_out=result.is_timeout)
+                                  timed_out=result.is_timeout,
+                                  stdout_truncated=getattr(result, "stdout_truncated", False),
+                                  stderr_truncated=getattr(result, "stderr_truncated", False),
+                                  stdout_bytes_observed=getattr(result, "stdout_bytes_observed", 0),
+                                  stderr_bytes_observed=getattr(result, "stderr_bytes_observed", 0),
+                                  execution_started=getattr(result, "execution_started", True),
+                                  failure_kind=getattr(result, "failure_kind", ""),
+                                  termination_confirmed=getattr(result, "termination_confirmed", True),
+                                  termination_reason=getattr(result, "termination_reason", ""),
+                                  limits_applied=bool(spec.stdout_limit_bytes or spec.stderr_limit_bytes))
 
 
 class ContainerWorkspaceRuntime(BaseWorkspaceRuntime):
@@ -888,6 +942,7 @@ class ContainerWorkspaceRuntime(BaseWorkspaceRuntime):
             auto_inputs: Whether to auto-map inputs
         """
         self.container = container
+        self._closed = False
 
         # Build runtime configuration
         config = RuntimeConfig(auto_map_inputs=auto_inputs)
@@ -904,6 +959,13 @@ class ContainerWorkspaceRuntime(BaseWorkspaceRuntime):
             provider=provider,
             enable_provider_env=enable_provider_env,
         )
+
+    def close(self) -> None:
+        """Release the owned Docker container."""
+        if self._closed:
+            return
+        self._closed = True
+        self.container.close()
 
     @override
     def manager(self, ctx: Optional[InvocationContext] = None) -> ContainerWorkspaceManager:

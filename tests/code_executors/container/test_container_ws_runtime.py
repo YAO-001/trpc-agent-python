@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import io
 import tarfile
-import time
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,14 +29,9 @@ from trpc_agent_sdk.code_executors._constants import (
     DEFAULT_RUN_CONTAINER_BASE,
     DEFAULT_SKILLS_CONTAINER,
     DIR_OUT,
-    DIR_RUNS,
-    DIR_SKILLS,
     DIR_WORK,
-    MAX_READ_SIZE_BYTES,
 )
 from trpc_agent_sdk.code_executors._types import (
-    ManifestFileRef,
-    ManifestOutput,
     WorkspaceCapabilities,
     WorkspaceInfo,
     WorkspaceInputSpec,
@@ -64,7 +57,6 @@ from trpc_agent_sdk.code_executors.container._container_ws_runtime import (
 )
 from trpc_agent_sdk.context import InvocationContext
 from trpc_agent_sdk.utils import CommandExecResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,7 +187,7 @@ class TestCreateWorkspace:
         fs.stage_inputs = AsyncMock()
         mgr = ContainerWorkspaceManager(cc, cfg, fs)
 
-        ws = await mgr.create_workspace("auto-exec")
+        await mgr.create_workspace("auto-exec")
 
         fs.stage_inputs.assert_called_once()
         args = fs.stage_inputs.call_args
@@ -226,7 +218,7 @@ class TestCleanup:
         fs = MagicMock()
         mgr = ContainerWorkspaceManager(cc, cfg, fs)
 
-        ws = await mgr.create_workspace("exec-1")
+        await mgr.create_workspace("exec-1")
         assert "exec-1" in mgr.ws_paths
 
         await mgr.cleanup("exec-1")
@@ -275,14 +267,20 @@ class TestNormalizeGlobs:
 
     def test_env_var_replacement(self):
         result = ContainerWorkspaceFS._normalize_globs([
-            "$OUTPUT_DIR/**", "${OUTPUT_DIR}/file.txt",
-            "$WORK_DIR/data", "${WORK_DIR}/data",
-            "$WORKSPACE_DIR/all", "${WORKSPACE_DIR}/all",
+            "$OUTPUT_DIR/**",
+            "${OUTPUT_DIR}/file.txt",
+            "$WORK_DIR/data",
+            "${WORK_DIR}/data",
+            "$WORKSPACE_DIR/all",
+            "${WORKSPACE_DIR}/all",
         ])
         assert result == [
-            f"{DIR_OUT}/**", f"{DIR_OUT}/file.txt",
-            f"{DIR_WORK}/data", f"{DIR_WORK}/data",
-            "all", "all",
+            f"{DIR_OUT}/**",
+            f"{DIR_OUT}/file.txt",
+            f"{DIR_WORK}/data",
+            f"{DIR_WORK}/data",
+            "all",
+            "all",
         ]
 
     def test_empty_patterns_stripped(self):
@@ -523,8 +521,7 @@ class TestCollect:
     async def test_collect_deduplicates(self):
         ws = _make_ws()
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=_ok(
-            stdout=f"{ws.path}/a.txt\n{ws.path}/a.txt\n"))
+        cc.exec_run = AsyncMock(return_value=_ok(stdout=f"{ws.path}/a.txt\n{ws.path}/a.txt\n"))
 
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode='w') as tar:
@@ -884,6 +881,49 @@ class TestCollectOutputs:
 
 class TestCopyFileOut:
 
+    def test_copy_file_out_stops_stream_after_retained_budget(self):
+        cc = _mock_container_client()
+        fs = ContainerWorkspaceFS(cc, RuntimeConfig())
+        payload = b"x" * 100_000
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as archive:
+            info = tarfile.TarInfo(name="large.bin")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        raw_archive = tar_buf.getvalue()
+
+        class CountingChunks:
+
+            def __init__(self, raw):
+                self._chunks = [raw[index:index + 512] for index in range(0, len(raw), 512)]
+                self.consumed_bytes = 0
+                self.closed = False
+
+            def __iter__(self):
+                for chunk in self._chunks:
+                    self.consumed_bytes += len(chunk)
+                    yield chunk
+
+            def close(self):
+                self.closed = True
+
+        chunks = CountingChunks(raw_archive)
+        cc.client.api.get_archive.return_value = (chunks, {})
+
+        data, raw_size, _ = fs._copy_file_out("/container/path/large.bin", max_bytes=1024)
+
+        assert data == b"x" * 1024
+        assert raw_size == len(payload)
+        assert chunks.consumed_bytes < len(raw_archive)
+        assert chunks.closed is True
+
+    def test_copy_file_out_rejects_negative_budget_before_api_call(self):
+        cc = _mock_container_client()
+        fs = ContainerWorkspaceFS(cc, RuntimeConfig())
+        with pytest.raises(ValueError, match="non-negative"):
+            fs._copy_file_out("/container/path/test.txt", max_bytes=-1)
+        cc.client.api.get_archive.assert_not_called()
+
     def test_copy_file_out_success(self):
         cc = _mock_container_client()
         cfg = RuntimeConfig()
@@ -1154,8 +1194,8 @@ class TestRunProgram:
 
     async def test_basic_run(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="output", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(
+            return_value=CommandExecResult(stdout="output", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig()
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1170,8 +1210,7 @@ class TestRunProgram:
 
     async def test_run_with_cwd(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig()
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1182,8 +1221,7 @@ class TestRunProgram:
 
     async def test_run_with_custom_env(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig()
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1194,8 +1232,8 @@ class TestRunProgram:
 
     async def test_run_with_timeout(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="", stderr="timed out", exit_code=-1, is_timeout=True))
+        cc.exec_run = AsyncMock(
+            return_value=CommandExecResult(stdout="", stderr="timed out", exit_code=-1, is_timeout=True))
         cfg = RuntimeConfig(command_args=CommandArgs(timeout=30.0))
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1211,8 +1249,7 @@ class TestRunProgram:
         """When spec.timeout is 0 (falsy), config timeout is selected initially,
         but then min(config_timeout, spec.timeout=0) yields 0."""
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="ok", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="ok", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig(command_args=CommandArgs(timeout=10.0))
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1227,8 +1264,7 @@ class TestRunProgram:
         """When spec.timeout is truthy, it is used as the initial timeout,
         then min(spec.timeout, spec.timeout) keeps it."""
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="ok", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="ok", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig(command_args=CommandArgs(timeout=10.0))
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1243,8 +1279,7 @@ class TestRunProgram:
         """When config timeout is None and spec.timeout is 0 (falsy), the
         initial `or` yields None, then the `is None` branch sets timeout = spec.timeout = 0."""
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="ok", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="ok", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig(command_args=CommandArgs(timeout=None))
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1257,8 +1292,7 @@ class TestRunProgram:
 
     async def test_run_measures_duration(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="ok", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="ok", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig()
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
@@ -1269,14 +1303,12 @@ class TestRunProgram:
 
     async def test_run_with_env_override_base(self):
         cc = _mock_container_client()
-        cc.exec_run = AsyncMock(return_value=CommandExecResult(
-            stdout="", stderr="", exit_code=0, is_timeout=False))
+        cc.exec_run = AsyncMock(return_value=CommandExecResult(stdout="", stderr="", exit_code=0, is_timeout=False))
         cfg = RuntimeConfig()
         runner = ContainerProgramRunner(cc, cfg)
         ws = _make_ws()
 
-        spec = WorkspaceRunProgramSpec(
-            cmd="echo", env={"WORKSPACE_DIR": "/custom/ws"})
+        spec = WorkspaceRunProgramSpec(cmd="echo", env={"WORKSPACE_DIR": "/custom/ws"})
         await runner.run_program(ws, spec)
 
         cmd_str = str(cc.exec_run.await_args)
@@ -1289,6 +1321,13 @@ class TestRunProgram:
 
 
 class TestContainerWorkspaceRuntime:
+
+    def test_close_is_idempotent_through_container_client(self):
+        cc = _mock_container_client()
+        runtime = ContainerWorkspaceRuntime(container=cc)
+        runtime.close()
+        runtime.close()
+        cc.close.assert_called_once_with()
 
     def test_init_without_host_config(self):
         cc = _mock_container_client()
@@ -1311,15 +1350,13 @@ class TestContainerWorkspaceRuntime:
                 f"{inputs_dir}:{DEFAULT_INPUTS_CONTAINER}:ro",
             ]
         }
-        runtime = ContainerWorkspaceRuntime(
-            container=cc, host_config=host_config, auto_inputs=True)
+        runtime = ContainerWorkspaceRuntime(container=cc, host_config=host_config, auto_inputs=True)
 
         assert isinstance(runtime.manager(), ContainerWorkspaceManager)
 
     def test_init_with_host_config_no_binds(self):
         cc = _mock_container_client()
-        runtime = ContainerWorkspaceRuntime(
-            container=cc, host_config={"Other": "value"})
+        runtime = ContainerWorkspaceRuntime(container=cc, host_config={"Other": "value"})
         assert isinstance(runtime.manager(), ContainerWorkspaceManager)
 
     def test_describe(self):
@@ -1408,8 +1445,7 @@ class TestCreateContainerWorkspaceRuntime:
     def test_with_container_config(self, mock_cc_cls):
         mock_cc_cls.return_value = _mock_container_client()
         cfg = ContainerConfig(image="custom:latest")
-        runtime = create_container_workspace_runtime(
-            container_config=cfg, host_config=None, auto_inputs=False)
+        runtime = create_container_workspace_runtime(container_config=cfg, host_config=None, auto_inputs=False)
 
         assert isinstance(runtime, ContainerWorkspaceRuntime)
         mock_cc_cls.assert_called_once()
@@ -1426,8 +1462,9 @@ class TestCreateContainerWorkspaceRuntime:
     def test_with_host_config(self, mock_cc_cls):
         mock_cc_cls.return_value = _mock_container_client()
         hcfg = {"Binds": ["/host:/container:ro"]}
-        runtime = create_container_workspace_runtime(
-            container_config=ContainerConfig(), host_config=hcfg, auto_inputs=True)
+        runtime = create_container_workspace_runtime(container_config=ContainerConfig(),
+                                                     host_config=hcfg,
+                                                     auto_inputs=True)
 
         assert isinstance(runtime, ContainerWorkspaceRuntime)
         call_kwargs = mock_cc_cls.call_args

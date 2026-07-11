@@ -236,6 +236,10 @@ class TestWorkspaceRunProgramSpec:
             stdin="input",
             timeout=30.0,
             limits=limits,
+            stdout_limit_bytes=4096,
+            stderr_limit_bytes=2048,
+            output_globs=["/workspace/out/*.json"],
+            output_limit_bytes=8192,
         )
 
         assert spec.cmd == "python"
@@ -245,6 +249,10 @@ class TestWorkspaceRunProgramSpec:
         assert spec.stdin == "input"
         assert spec.timeout == 30.0
         assert spec.limits == limits
+        assert spec.stdout_limit_bytes == 4096
+        assert spec.stderr_limit_bytes == 2048
+        assert spec.output_globs == ["/workspace/out/*.json"]
+        assert spec.output_limit_bytes == 8192
 
     def test_create_workspace_run_program_spec_defaults(self):
         """Test creating workspace run program spec with defaults."""
@@ -257,6 +265,10 @@ class TestWorkspaceRunProgramSpec:
         assert spec.stdin == ""
         assert spec.timeout == 0
         assert isinstance(spec.limits, WorkspaceResourceLimits)
+        assert spec.stdout_limit_bytes == 0
+        assert spec.stderr_limit_bytes == 0
+        assert spec.output_globs == []
+        assert spec.output_limit_bytes == 0
 
 
 class TestWorkspaceRunResult:
@@ -270,6 +282,13 @@ class TestWorkspaceRunResult:
             exit_code=0,
             duration=1.5,
             timed_out=False,
+            stdout_truncated=True,
+            stdout_bytes_observed=5000,
+            execution_started=True,
+            failure_kind="output_limit_exceeded",
+            termination_confirmed=True,
+            termination_reason="output_limit_exceeded",
+            limits_applied=True,
         )
 
         assert result.stdout == "output"
@@ -277,6 +296,13 @@ class TestWorkspaceRunResult:
         assert result.exit_code == 0
         assert result.duration == 1.5
         assert result.timed_out is False
+        assert result.stdout_truncated is True
+        assert result.stdout_bytes_observed == 5000
+        assert result.execution_started is True
+        assert result.failure_kind == "output_limit_exceeded"
+        assert result.termination_confirmed is True
+        assert result.termination_reason == "output_limit_exceeded"
+        assert result.limits_applied is True
 
     def test_create_workspace_run_result_defaults(self):
         """Test creating workspace run result with defaults."""
@@ -287,6 +313,15 @@ class TestWorkspaceRunResult:
         assert result.exit_code == 0
         assert result.duration == 0
         assert result.timed_out is False
+        assert result.stdout_truncated is False
+        assert result.stderr_truncated is False
+        assert result.stdout_bytes_observed == 0
+        assert result.stderr_bytes_observed == 0
+        assert result.execution_started is False
+        assert result.failure_kind == ""
+        assert result.termination_confirmed is True
+        assert result.termination_reason == ""
+        assert result.limits_applied is False
 
 
 class TestWorkspaceStageOptions:
@@ -408,6 +443,8 @@ class TestManifestFileRef:
             content="content",
             saved_as="/tmp/output.txt",
             version=1,
+            size_bytes=12,
+            truncated=True,
         )
 
         assert file_ref.name == "output.txt"
@@ -415,6 +452,8 @@ class TestManifestFileRef:
         assert file_ref.content == "content"
         assert file_ref.saved_as == "/tmp/output.txt"
         assert file_ref.version == 1
+        assert file_ref.size_bytes == 12
+        assert file_ref.truncated is True
 
     def test_create_manifest_file_ref_defaults(self):
         """Test creating manifest file ref with defaults."""
@@ -425,6 +464,8 @@ class TestManifestFileRef:
         assert file_ref.content == ""
         assert file_ref.saved_as == ""
         assert file_ref.version == 0
+        assert file_ref.size_bytes == 0
+        assert file_ref.truncated is False
 
 
 class TestManifestOutput:
