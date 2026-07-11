@@ -4,11 +4,19 @@
 #
 # tRPC-Agent-Python is licensed under Apache-2.0.
 
+import logging
 import os
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from trpc_agent_sdk.code_executors import BaseWorkspaceRuntime
+from trpc_agent_sdk.code_executors import WorkspaceCapabilities
+from trpc_agent_sdk.code_executors import WorkspaceInfo
+from trpc_agent_sdk.code_executors import WorkspaceRunResult
+from trpc_agent_sdk.context import create_agent_context
 from trpc_agent_sdk.skills._common import loaded_state_key
+from trpc_agent_sdk.skills.stager import SkillStageResult
+from trpc_agent_sdk.skills.tools import _skill_run as skill_run_module
 from trpc_agent_sdk.skills.tools._common import inline_json_schema_refs
 from trpc_agent_sdk.skills.tools._skill_run import ArtifactInfo
 from trpc_agent_sdk.skills.tools._skill_run import SkillRunFile
@@ -32,6 +40,7 @@ def _make_tool() -> SkillRunTool:
 
 
 class TestSchemaHelpers:
+
     def test_inline_json_schema_refs(self):
         schema = {"$defs": {"X": {"type": "string"}}, "properties": {"x": {"$ref": "#/$defs/X"}}}
         out = inline_json_schema_refs(schema)
@@ -40,6 +49,7 @@ class TestSchemaHelpers:
 
 
 class TestModuleHelpers:
+
     def test_is_text_mime(self):
         assert _is_text_mime("text/plain") is True
         assert _is_text_mime("application/json") is True
@@ -85,6 +95,7 @@ class TestModuleHelpers:
 
 
 class TestModels:
+
     def test_run_models(self):
         inp = SkillRunInput(skill="s", command="echo hi")
         out = SkillRunOutput()
@@ -95,6 +106,7 @@ class TestModels:
 
 
 class TestSkillRunToolBasics:
+
     def test_resolve_cwd(self):
         tool = _make_tool()
         assert tool._resolve_cwd("", "skills/x") == "skills/x"
@@ -135,3 +147,78 @@ class TestSkillRunToolBasics:
         ctx.actions.state_delta = {key: True}
         ctx.session_state = {}
         assert tool._is_skill_loaded(ctx, "test") is True
+
+
+async def test_nonzero_stderr_is_not_logged(caplog, monkeypatch):
+    raw = "raw-sdk-log-secret-987"
+
+    class FakeWorkspaceRuntime(BaseWorkspaceRuntime):
+
+        def __init__(self):
+            self._manager = MagicMock()
+            self._manager.create_workspace = AsyncMock(return_value=WorkspaceInfo(id="ws-1", path="/workspace"))
+            self._fs = MagicMock()
+            self._fs.collect = AsyncMock(return_value=[])
+            self._runner = MagicMock()
+            self._runner.run_program = AsyncMock(return_value=WorkspaceRunResult(
+                stdout="fixture-result-path",
+                stderr=f"client_secret={raw}",
+                exit_code=7,
+                duration=0.01,
+            ))
+
+        def manager(self, ctx=None):
+            del ctx
+            return self._manager
+
+        def fs(self, ctx=None):
+            del ctx
+            return self._fs
+
+        def runner(self, ctx=None):
+            del ctx
+            return self._runner
+
+        def describe(self, ctx=None):
+            del ctx
+            return WorkspaceCapabilities()
+
+    class FakeStager:
+
+        async def stage_skill(self, request):
+            del request
+            return SkillStageResult(workspace_skill_dir="skills/fixture")
+
+    runtime = FakeWorkspaceRuntime()
+    repo = MagicMock()
+    repo.get_workspace_runtime.return_value = runtime
+    repo.skill_run_env.return_value = {}
+    tool = SkillRunTool(
+        repository=repo,
+        skill_stager=FakeStager(),
+        create_ws_name_cb=lambda _ctx: "ws-1",
+    )
+    ctx = MagicMock()
+    ctx.agent_context = create_agent_context()
+    ctx.agent_name = ""
+    ctx.actions.state_delta = {}
+    ctx.session_state = {}
+    audit_logger = logging.getLogger("test.skill_run.audit")
+    caplog.set_level(logging.DEBUG, logger=audit_logger.name)
+    for level in ("debug", "info", "warning", "error", "fatal"):
+        monkeypatch.setattr(skill_run_module.logger, level, getattr(audit_logger, level))
+
+    payload = await tool._run_async_impl(
+        tool_context=ctx,
+        args={
+            "skill": "fixture",
+            "command": "python check.py"
+        },
+    )
+
+    assert payload["stdout"] == "fixture-result-path"
+    assert raw in payload["stderr"]
+    stderr_bytes = len(payload["stderr"].encode("utf-8", errors="replace"))
+    assert f"Skill program failed: exit_code=7, stderr_bytes={stderr_bytes}" in caplog.text
+    assert caplog.records
+    assert all(raw not in record.getMessage() for record in caplog.records)

@@ -30,6 +30,7 @@ from .models import Finding
 from .models import ReviewWarning
 from .models import SandboxRun
 from .models import utc_now
+from .redaction_boundary import RedactionBoundary
 from .sandbox_artifact_loader import load_sandbox_artifacts
 from .secret_redactor import SecretRedactor
 
@@ -66,6 +67,16 @@ class SandboxResult:
     warnings: list[ReviewWarning]
     needs_human_review: list[ReviewWarning]
     effective_runtime: str
+
+
+class _BoundaryRedactor(SecretRedactor):
+    """SecretRedactor-compatible adapter that records every loader redaction."""
+
+    def __init__(self, boundary: RedactionBoundary) -> None:
+        self.boundary = boundary
+
+    def redact_text(self, text: str) -> Any:
+        return self.boundary.text(text)
 
 
 def _inherited_platform_env(
@@ -115,42 +126,44 @@ def _read_output_file(path: Path, *, limit: int) -> tuple[str, bool]:
     return text, truncated
 
 
-def _sanitize_stream(text: str, *, redactor: SecretRedactor, limit: int) -> tuple[str, bool]:
-    redacted = redactor.redact_text(_normalize_newlines(text)).text
+def _sanitize_stream(text: object, *, boundary: RedactionBoundary, limit: int) -> tuple[str, bool]:
+    redacted = _normalize_newlines(boundary.text(text).text)
     return _truncate_text(redacted, limit)
 
 
 def _sanitize_output_mapping(
     output_map: dict[str, str],
     *,
-    redactor: SecretRedactor,
+    boundary: RedactionBoundary,
     already_truncated: bool,
     max_files: int,
     max_file_bytes: int,
 ) -> tuple[dict[str, str], bool]:
-    limited: dict[str, str] = {}
     output_truncated = already_truncated
-    for index, (name, content) in enumerate(sorted(output_map.items())):
-        if index >= max_files:
-            output_truncated = True
-            break
-        redacted = redactor.redact_text(_normalize_newlines(content)).text
+    sorted_items = sorted(output_map.items())
+    selected_items = sorted_items[:max(0, max_files)]
+    output_truncated = output_truncated or len(selected_items) < len(sorted_items)
+    cleaned = boundary.clean(dict(selected_items))
+    limited: dict[str, str] = {}
+    for safe_name, content in cleaned.items():
+        redacted = _normalize_newlines(content)
         truncated_content, was_truncated = _truncate_text(redacted, max_file_bytes)
         output_truncated = output_truncated or was_truncated
-        limited[name] = truncated_content
+        limited[safe_name] = truncated_content
     return limited, output_truncated
 
 
-def _failure_warning(run: SandboxRun) -> ReviewWarning:
+def _failure_warning(run: SandboxRun, *, boundary: RedactionBoundary) -> ReviewWarning:
     message = run.stderr or run.stdout or run.warning or "sandbox command failed or timed out"
-    return ReviewWarning(
-        category="sandbox",
-        title="sandbox command failed",
-        message=f"{' '.join(run.command)} exited with {run.exit_code}: {message}",
-        confidence=1.0,
-        source=["sandbox_runner"],
-        needs_human_review=True,
-    )
+    payload = boundary.clean({
+        "category": "sandbox",
+        "title": "sandbox command failed",
+        "message": f"{' '.join(run.command)} exited with {run.exit_code}: {message}",
+        "confidence": 1.0,
+        "source": ["sandbox_runner"],
+        "needs_human_review": True,
+    })
+    return ReviewWarning.model_validate(payload)
 
 
 def _run_has_human_review_artifact(run: SandboxRun) -> bool:
@@ -171,23 +184,33 @@ def _run_has_human_review_artifact(run: SandboxRun) -> bool:
     return False
 
 
-def _runtime_warning(title: str, message: str) -> ReviewWarning:
-    return ReviewWarning(
-        category="sandbox",
-        title=title,
-        message=message,
-        confidence=1.0,
-        source=["sandbox_runner"],
-        needs_human_review=True,
-    )
+def _runtime_warning(title: object, message: object, *, boundary: RedactionBoundary) -> ReviewWarning:
+    return ReviewWarning.model_validate(
+        boundary.clean({
+            "category": "sandbox",
+            "title": title,
+            "message": message,
+            "confidence": 1.0,
+            "source": ["sandbox_runner"],
+            "needs_human_review": True,
+        }))
 
 
 class LocalSkillHarness:
     """Explicit local runtime that stages and executes one validated request."""
 
-    def __init__(self, *, skill_dir: Path, redactor: SecretRedactor) -> None:
+    def __init__(
+        self,
+        *,
+        skill_dir: Path,
+        boundary: RedactionBoundary | None = None,
+        redactor: SecretRedactor | None = None,
+    ) -> None:
+        if boundary is not None and redactor is not None:
+            raise ValueError("pass boundary or redactor, not both")
         self.skill_dir = skill_dir
-        self.redactor = redactor
+        self.boundary = boundary or RedactionBoundary(redactor=redactor)
+        self.redactor = self.boundary.redactor
 
     def execute_one(
         self,
@@ -280,40 +303,51 @@ class LocalSkillHarness:
         )
         output_map, output_truncated = _sanitize_output_mapping(
             output_map,
-            redactor=self.redactor,
+            boundary=self.boundary,
             already_truncated=file_truncated,
             max_files=min(request.output_spec.max_files, MAX_OUTPUT_FILES),
             max_file_bytes=min(request.output_spec.max_file_bytes, MAX_OUTPUT_FILE_BYTES),
         )
-        stdout, stdout_truncated = _sanitize_stream(stdout, redactor=self.redactor, limit=MAX_STDOUT_CHARS)
-        stderr, stderr_truncated = _sanitize_stream(stderr, redactor=self.redactor, limit=MAX_STDERR_CHARS)
-        return SandboxRun(
-            run_id="sandbox_" + request.request_id.replace(":", "_"),
-            task_id=task_id,
-            runtime="local",
-            command=logical_command,
-            decision="allow",
-            exit_code=exit_code,
-            timed_out=timed_out,
-            duration_ms=0 if dry_run else int((time.perf_counter() - started) * 1000),
-            stdout=stdout,
-            stderr=stderr,
-            output_files=output_map,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
-            output_truncated=output_truncated,
-            warning="" if exit_code == 0 and not timed_out else "sandbox command failed or timed out",
-            created_at=utc_now(dry_run),
-        )
+        stdout, stdout_truncated = _sanitize_stream(stdout, boundary=self.boundary, limit=MAX_STDOUT_CHARS)
+        stderr, stderr_truncated = _sanitize_stream(stderr, boundary=self.boundary, limit=MAX_STDERR_CHARS)
+        payload = self.boundary.clean({
+            "run_id": "sandbox_" + request.request_id.replace(":", "_"),
+            "task_id": task_id,
+            "runtime": "local",
+            "command": logical_command,
+            "decision": "allow",
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "duration_ms": 0 if dry_run else int((time.perf_counter() - started) * 1000),
+            "stdout": stdout,
+            "stderr": stderr,
+            "output_files": output_map,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "output_truncated": output_truncated,
+            "warning": "" if exit_code == 0 and not timed_out else "sandbox command failed or timed out",
+            "created_at": utc_now(dry_run),
+        })
+        return SandboxRun.model_validate(payload)
 
 
 class TrpcSkillToolSetHarness:
     """Container SkillToolSet execution path for one validated request."""
 
-    def __init__(self, *, runtime: str, policy: ReviewExecutionPolicy, redactor: SecretRedactor) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: str,
+        policy: ReviewExecutionPolicy,
+        boundary: RedactionBoundary | None = None,
+        redactor: SecretRedactor | None = None,
+    ) -> None:
+        if boundary is not None and redactor is not None:
+            raise ValueError("pass boundary or redactor, not both")
         self.runtime = runtime
         self.policy = policy
-        self.redactor = redactor
+        self.boundary = boundary or RedactionBoundary(redactor=redactor)
+        self.redactor = self.boundary.redactor
 
     def execute_one(
         self,
@@ -423,49 +457,60 @@ class TrpcSkillToolSetHarness:
             output_truncated = output_truncated or bool(item.get("truncated"))
         output_map, output_truncated = _sanitize_output_mapping(
             output_map,
-            redactor=self.redactor,
+            boundary=self.boundary,
             already_truncated=output_truncated,
             max_files=max_files,
             max_file_bytes=max_file_bytes,
         )
         stdout, stdout_truncated = _sanitize_stream(
-            str(output.get("stdout") or ""),
-            redactor=self.redactor,
+            output.get("stdout") or "",
+            boundary=self.boundary,
             limit=MAX_STDOUT_CHARS,
         )
         stderr, stderr_truncated = _sanitize_stream(
-            str(output.get("stderr") or ""),
-            redactor=self.redactor,
+            output.get("stderr") or "",
+            boundary=self.boundary,
             limit=MAX_STDERR_CHARS,
         )
-        warning = "; ".join(str(item) for item in output.get("warnings", []) or [])
-        return SandboxRun(
-            run_id="sandbox_" + request.request_id.replace(":", "_"),
-            task_id=task_id,
-            runtime=self.runtime,
-            command=list(request.command_argv),
-            decision="allow",
-            exit_code=int(output.get("exit_code") or 0),
-            timed_out=bool(output.get("timed_out")),
-            duration_ms=0 if dry_run else int(output.get("duration_ms") or 0),
-            stdout=stdout,
-            stderr=stderr,
-            output_files=output_map,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
-            output_truncated=output_truncated,
-            warning=warning,
-            created_at=utc_now(dry_run),
-        )
+        warning = "; ".join(self.boundary.text(item).text for item in output.get("warnings", []) or [])
+        payload = self.boundary.clean({
+            "run_id": "sandbox_" + request.request_id.replace(":", "_"),
+            "task_id": task_id,
+            "runtime": self.runtime,
+            "command": list(request.command_argv),
+            "decision": "allow",
+            "exit_code": int(output.get("exit_code") or 0),
+            "timed_out": bool(output.get("timed_out")),
+            "duration_ms": 0 if dry_run else int(output.get("duration_ms") or 0),
+            "stdout": stdout,
+            "stderr": stderr,
+            "output_files": output_map,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "output_truncated": output_truncated,
+            "warning": warning,
+            "created_at": utc_now(dry_run),
+        })
+        return SandboxRun.model_validate(payload)
 
 
 class SandboxRunner:
 
-    def __init__(self, *, example_dir: Path, policy: ReviewExecutionPolicy, redactor: SecretRedactor) -> None:
+    def __init__(
+        self,
+        *,
+        example_dir: Path,
+        policy: ReviewExecutionPolicy,
+        boundary: RedactionBoundary | None = None,
+        redactor: SecretRedactor | None = None,
+    ) -> None:
+        if boundary is not None and redactor is not None:
+            raise ValueError("pass boundary or redactor, not both")
         self.example_dir = example_dir
         self.skill_dir = example_dir / "skills" / "code-review"
         self.policy = policy
-        self.redactor = redactor
+        self.boundary = boundary or RedactionBoundary(redactor=redactor)
+        self.redactor = self.boundary.redactor
 
     def run(
         self,
@@ -487,13 +532,16 @@ class SandboxRunner:
         if effective_runtime != policy_context.runtime:
             raise ValueError("runtime does not match policy context")
 
+        safe_review_input = self.boundary.clean(review_input)
         decisions: list[FilterIntercept] = []
         allowed_requests: list[ExecutionRequest] = []
         for request in requests:
             result = self.policy.evaluate(request, policy_context)
-            decisions.append(result.intercept)
+            safe_intercept = FilterIntercept.model_validate(
+                self.boundary.clean(result.intercept.model_dump(mode="json")))
+            decisions.append(safe_intercept)
             if on_decision is not None:
-                on_decision(result.intercept)
+                on_decision(safe_intercept)
             if result.decision == "allow":
                 allowed_requests.append(request)
         if not allowed_requests:
@@ -508,7 +556,8 @@ class SandboxRunner:
             needs_human_review.append(
                 _runtime_warning(
                     f"{effective_runtime} runtime failed",
-                    f"SkillToolSet harness could not be selected: {exc}",
+                    f"SkillToolSet harness could not be selected: {self.boundary.text(exc).text}",
+                    boundary=self.boundary,
                 ))
             harness = None
 
@@ -517,7 +566,7 @@ class SandboxRunner:
                 try:
                     execution = harness.execute_one(
                         task_id=task_id,
-                        review_input=review_input,
+                        review_input=safe_review_input,
                         request=request,
                         policy_context=policy_context,
                         dry_run=dry_run,
@@ -526,24 +575,33 @@ class SandboxRunner:
                     needs_human_review.append(
                         _runtime_warning(
                             f"{effective_runtime} runtime failed",
-                            f"SkillToolSet execution did not complete: {exc}",
+                            f"SkillToolSet execution did not complete: {self.boundary.text(exc).text}",
+                            boundary=self.boundary,
                         ))
                     continue
                 for run in execution.runs:
-                    runs.append(run)
+                    safe_run = SandboxRun.model_validate(self.boundary.clean(run.model_dump(mode="json")))
+                    runs.append(safe_run)
                     if on_run is not None:
-                        on_run(run)
+                        on_run(safe_run)
 
-        artifacts = load_sandbox_artifacts(runs, redactor=self.redactor)
+        artifacts = load_sandbox_artifacts(runs, redactor=_BoundaryRedactor(self.boundary))
         for run in runs:
             if (run.exit_code != 0 or run.timed_out) and not _run_has_human_review_artifact(run):
-                needs_human_review.append(_failure_warning(run))
-        warnings.extend(artifacts.warnings)
-        needs_human_review.extend(artifacts.needs_human_review)
+                needs_human_review.append(_failure_warning(run, boundary=self.boundary))
+        findings = [
+            Finding.model_validate(self.boundary.clean(item.model_dump(mode="json"))) for item in artifacts.findings
+        ]
+        warnings.extend(
+            ReviewWarning.model_validate(self.boundary.clean(item.model_dump(mode="json")))
+            for item in artifacts.warnings)
+        needs_human_review.extend(
+            ReviewWarning.model_validate(self.boundary.clean(item.model_dump(mode="json")))
+            for item in artifacts.needs_human_review)
         return SandboxResult(
             runs=runs,
             decisions=decisions,
-            findings=artifacts.findings,
+            findings=findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
             effective_runtime=effective_runtime,
@@ -551,5 +609,14 @@ class SandboxRunner:
 
     def _harness_for_runtime(self, *, runtime: str):
         if runtime == "local":
-            return LocalSkillHarness(skill_dir=self.skill_dir, redactor=self.redactor)
-        return TrpcSkillToolSetHarness(runtime=runtime, policy=self.policy, redactor=self.redactor)
+            return LocalSkillHarness(skill_dir=self.skill_dir, boundary=self.boundary)
+        try:
+            return TrpcSkillToolSetHarness(runtime=runtime, policy=self.policy, boundary=self.boundary)
+        except TypeError as exc:
+            if "unexpected keyword argument 'boundary'" not in self.boundary.text(exc).text:
+                raise
+            return TrpcSkillToolSetHarness(
+                runtime=runtime,
+                policy=self.policy,
+                redactor=_BoundaryRedactor(self.boundary),
+            )

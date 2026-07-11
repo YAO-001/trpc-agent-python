@@ -19,6 +19,7 @@ from .models import ReviewReport
 from .models import ReviewWarning
 from .models import SandboxRun
 from .models import TelemetrySummary
+from .redaction_boundary import RedactionBoundary
 
 
 def _severity_distribution(findings: list[Finding]) -> dict[str, int]:
@@ -75,12 +76,9 @@ def _section_summary(
             "needs_human_review": len(needs_human_review),
         },
         "filter_summary": {
-            "denied":
-            telemetry.filter_denied_count,
-            "needs_human_review":
-            telemetry.filter_needs_review_count,
-            "persisted_intercepts":
-            len([item for item in filter_intercepts if item.decision in {"deny", "needs_human_review"}]),
+            "denied": telemetry.filter_denied_count,
+            "needs_human_review": telemetry.filter_needs_review_count,
+            "persisted_intercepts": len(filter_intercepts),
         },
         "metrics": telemetry.model_dump(mode="json"),
         "sandbox_summary": {
@@ -100,9 +98,15 @@ def _posix_path(path: Path) -> str:
 
 class ReportBuilder:
 
-    def __init__(self, output_dir: Path, db_url: str) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        db_url: str,
+        boundary: RedactionBoundary | None = None,
+    ) -> None:
         self.output_dir = output_dir
         self.db_url = db_url
+        self.boundary = boundary or RedactionBoundary()
 
     def _display_path(self, path: Path) -> str:
         resolved = path.resolve()
@@ -114,13 +118,38 @@ class ReportBuilder:
         return path.name
 
     def _display_db_url(self) -> str:
+        if not self.db_url.lower().startswith("sqlite:"):
+            self.boundary.text(self.db_url)
+        safe_url = self.boundary.display_db_url(self.db_url)
         prefix = "sqlite:///"
-        if not self.db_url.startswith(prefix) or self.db_url == "sqlite:///:memory:":
-            return self.db_url
-        db_path = Path(self.db_url.removeprefix(prefix))
+        if not safe_url.startswith(prefix) or safe_url == "sqlite:///:memory:":
+            return safe_url
+        db_path = Path(safe_url.removeprefix(prefix))
         if not db_path.is_absolute():
             return prefix + _posix_path(db_path)
         return prefix + self._display_path(db_path)
+
+    def _refresh_redaction_fields(self, payload: dict[str, Any]) -> None:
+        summary = self.boundary.summary.model_dump(mode="json")
+        payload["redaction_summary"] = summary
+        telemetry = payload.get("telemetry")
+        if isinstance(telemetry, dict):
+            telemetry["redaction_count"] = summary["total_redactions"]
+        section_summary = payload.get("section_summary")
+        if isinstance(section_summary, dict):
+            metrics = section_summary.get("metrics")
+            if isinstance(metrics, dict):
+                metrics["redaction_count"] = summary["total_redactions"]
+
+    def _safe_report(self, report: ReviewReport) -> ReviewReport:
+        payload = self.boundary.clean(report.model_dump(mode="json"))
+        self._refresh_redaction_fields(payload)
+        payload = self.boundary.clean(payload)
+        self._refresh_redaction_fields(payload)
+        safe_report = ReviewReport.model_validate(payload)
+        normalized = safe_report.model_dump(mode="json")
+        self._refresh_redaction_fields(normalized)
+        return ReviewReport.model_validate(normalized)
 
     def build(
         self,
@@ -149,13 +178,13 @@ class ReportBuilder:
             severity_distribution=severity_distribution,
             recommendations=recommendations,
         )
-        return ReviewReport(
+        draft = ReviewReport(
             task_id=task_id,
             conclusion=_conclusion(findings, needs_human_review),
             findings=findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
-            filter_intercepts=[item for item in filter_intercepts if item.decision in {"deny", "needs_human_review"}],
+            filter_intercepts=filter_intercepts,
             sandbox_runs=sandbox_runs,
             telemetry=telemetry,
             severity_distribution=severity_distribution,
@@ -165,6 +194,7 @@ class ReportBuilder:
             database_query=query_cmd,
             input_summary=input_summary,
         )
+        return self._safe_report(draft)
 
     def write(
         self,
@@ -181,13 +211,18 @@ class ReportBuilder:
                 "json": self._display_path(json_path),
                 "markdown": self._display_path(md_path),
             }})
-        json_text = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2)
-        markdown = self.to_markdown(report)
+        safe_report = self._safe_report(report)
+        json_text = json.dumps(safe_report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2)
+        markdown = self._render_markdown(safe_report)
         json_path.write_text(json_text + "\n", encoding="utf-8")
         md_path.write_text(markdown, encoding="utf-8")
-        return json_text, markdown, report
+        return json_text, markdown, safe_report
 
     def to_markdown(self, report: ReviewReport) -> str:
+        return self._render_markdown(self._safe_report(report))
+
+    @staticmethod
+    def _render_markdown(report: ReviewReport) -> str:
         lines = [
             "# Code Review Report",
             "",

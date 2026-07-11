@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
+from urllib.parse import unquote
 
 from sqlalchemy.engine import URL
 from sqlalchemy.engine import make_url
@@ -18,10 +20,18 @@ from .models import RedactionSummary
 from .secret_redactor import RedactionResult
 from .secret_redactor import SecretRedactor
 
-_SENSITIVE_FIELD_RE = re.compile(
-    rf"^(?:{'|'.join(SecretRedactor.SECRET_ALIASES)})$",
+_SENSITIVE_FIELD_SEARCH_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<alias>{'|'.join(SecretRedactor.SECRET_ALIASES)})(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+
+
+def _fully_unquote(value: str) -> str:
+    while True:
+        decoded = unquote(value)
+        if decoded == value:
+            return decoded
+        value = decoded
 
 
 class RedactionBoundary:
@@ -43,10 +53,22 @@ class RedactionBoundary:
     def _clean(self, value: Any, *, sensitive_field: str | None) -> Any:
         if isinstance(value, dict):
             cleaned: dict[Any, Any] = {}
+            prepared: list[tuple[str, str, Any, str | None]] = []
             for key, item in value.items():
                 raw_key = str(key)
                 cleaned_key = self.text(raw_key).text
-                child_field = raw_key if _SENSITIVE_FIELD_RE.fullmatch(raw_key) else sensitive_field
+                match = _SENSITIVE_FIELD_SEARCH_RE.search(raw_key)
+                child_field = match.group("alias") if match is not None else sensitive_field
+                prepared.append((raw_key, cleaned_key, item, child_field))
+            key_counts: dict[str, int] = {}
+            for _, cleaned_key, _, _ in prepared:
+                key_counts[cleaned_key] = key_counts.get(cleaned_key, 0) + 1
+            for raw_key, cleaned_key, item, child_field in prepared:
+                digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+                if key_counts[cleaned_key] > 1:
+                    cleaned_key = f"{cleaned_key}#{digest}"
+                while cleaned_key in cleaned:
+                    cleaned_key = f"{cleaned_key}#{digest}"
                 cleaned[cleaned_key] = self._clean(item, sensitive_field=child_field)
             return cleaned
         if isinstance(value, (list, tuple)):
@@ -93,11 +115,16 @@ class RedactionBoundary:
     def display_db_url(self, db_url: str) -> str:
         url = make_url(db_url)
         if url.get_backend_name() == "sqlite":
-            return self.text(db_url).text
+            decoded = self.text(_fully_unquote(db_url)).text
+            rendered = make_url(decoded).render_as_string(hide_password=True)
+            return self.text(rendered).text
+        host = self.text(_fully_unquote(url.host or "")).text or None
+        database = self.text(_fully_unquote(url.database or "")).text if url.database is not None else None
         public = URL.create(
             drivername=url.drivername,
-            host=url.host,
+            host=host,
             port=url.port,
-            database=url.database,
+            database=database,
         )
-        return public.render_as_string(hide_password=True)
+        rendered = public.render_as_string(hide_password=True)
+        return self.text(rendered).text

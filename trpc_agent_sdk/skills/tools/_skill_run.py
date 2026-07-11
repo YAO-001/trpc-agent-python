@@ -805,9 +805,11 @@ class SkillRunTool(BaseTool):
             ctx,
         )
         if ret.exit_code != 0:
-            raw_stderr = ret.stderr or ""
-            logger.info("Failed to run program: cmd=%s, exit_code=%s, stderr=%s", cmd, ret.exit_code,
-                        raw_stderr.strip())
+            logger.info(
+                "Skill program failed: exit_code=%s, stderr_bytes=%s",
+                ret.exit_code,
+                len((ret.stderr or "").encode("utf-8", errors="replace")),
+            )
         return ret
 
     def _resolve_cwd(self, cwd: str, skill_dir: str) -> str:
