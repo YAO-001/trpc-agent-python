@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from itertools import product
 
@@ -26,7 +27,6 @@ from agent.models import ReviewTaskStatus
 from agent.models import SandboxRun
 from agent.models import TERMINAL_TASK_STATUSES
 from agent.redaction_boundary import RedactionBoundary
-from agent.sandbox_runner import HarnessExecutionResult
 from agent.sandbox_runner import SandboxRunner
 from agent.storage import ReviewStorage
 from agent.task_state import transition_task
@@ -45,6 +45,12 @@ def _request(tmp_path, *, task_id="task-1", runtime="container"):
     path = tmp_path / f"{task_id}.json"
     path.write_text("{}", encoding="utf-8")
     return build_execution_requests(task_id, runtime, str(path))[0]
+
+
+def _three_valid_requests(tmp_path, *, task_id: str, runtime: str):
+    path = tmp_path / f"{task_id}-review.json"
+    path.write_text("{}", encoding="utf-8")
+    return build_execution_requests(task_id, runtime, str(path))
 
 
 def _context(request):
@@ -166,11 +172,260 @@ def test_failed_status_accepts_redacted_failure_details():
     assert task.failure_reason_redacted == "redacted persistence failure"
 
 
-def test_sandbox_request_and_failure_fields_remain_temporarily_optional():
-    run = SandboxRun(run_id="run-1", task_id="task-1", runtime="container")
+def test_sandbox_request_identity_is_required():
+    with pytest.raises(ValidationError):
+        SandboxRun(run_id="run-1", task_id="task-1", runtime="container")
 
-    assert run.request_id == ""
-    assert run.failure_kind == ""
+
+def test_build_execution_requests_normalizes_auto_to_container(tmp_path):
+    requests = _three_valid_requests(
+        tmp_path,
+        task_id="task-auto-requests",
+        runtime="auto",
+    )
+
+    assert len(requests) == 3
+    assert {item.runtime for item in requests} == {"container"}
+
+
+def test_auto_runtime_records_each_request_when_container_start_fails(tmp_path):
+    created = []
+    raw = "runtime-construction-secret-987"
+
+    def fail_factory(runtime):
+        created.append(runtime)
+        raise RuntimeError(f"client_secret={raw}")
+
+    requests = _three_valid_requests(
+        tmp_path,
+        task_id="task-auto-runtime",
+        runtime="container",
+    )
+    saved = []
+    runner = _runner()
+    runner._harness_for_runtime = fail_factory
+
+    result = runner.run(
+        task_id="task-auto-runtime",
+        review_input={"task_id": "task-auto-runtime"},
+        runtime="auto",
+        dry_run=True,
+        requests=requests,
+        policy_context=_context(requests[0]),
+        on_run=saved.append,
+    )
+
+    assert created == ["container"]
+    assert result.effective_runtime == "container"
+    assert len(result.runs) == len(saved) == 3
+    assert saved == result.runs
+    assert [item.request_id for item in result.runs] == [item.request_id for item in requests]
+    assert {item.failure_kind for item in result.runs} == {"runtime_unavailable"}
+    assert all(item.runtime == "container" for item in result.runs)
+    assert all(item.decision == "allow" and item.exit_code == -1 for item in result.runs)
+    assert [item.command for item in result.runs] == [list(item.command_argv) for item in requests]
+    assert [item.run_id for item in result.runs] == [
+        "sandbox_" + hashlib.sha256(f"{item.task_id}:{item.request_id}".encode("utf-8")).hexdigest()[:24]
+        for item in requests
+    ]
+    assert raw not in json.dumps([item.model_dump(mode="json") for item in result.runs], sort_keys=True)
+
+
+def test_successful_local_runs_keep_request_identity(tmp_path):
+    requests = _three_valid_requests(
+        tmp_path,
+        task_id="task-local-identity",
+        runtime="local",
+    )
+
+    result = _runner().run(
+        task_id="task-local-identity",
+        review_input={"task_id": "task-local-identity"},
+        runtime="local",
+        dry_run=True,
+        requests=requests,
+        policy_context=_context(requests[0]),
+    )
+
+    assert [item.request_id for item in result.runs] == [item.request_id for item in requests]
+    assert [item.command for item in result.runs] == [list(item.command_argv) for item in requests]
+    assert {item.runtime for item in result.runs} == {"local"}
+
+
+def test_request_execution_exception_records_failure_and_continues(tmp_path):
+    requests = _three_valid_requests(
+        tmp_path,
+        task_id="task-execution-error",
+        runtime="container",
+    )
+    calls = []
+    saved = []
+    raw = "orchestration-secret-987"
+
+    class PerRequestHarness:
+
+        def execute_one(self, **kwargs):
+            request = kwargs["request"]
+            calls.append(request.request_id)
+            if request.request_id == requests[1].request_id:
+                raise RuntimeError(f"client_secret={raw}")
+            return _successful_run(request)
+
+    runner = _runner(harness=PerRequestHarness())
+    result = runner.run(
+        task_id="task-execution-error",
+        review_input={"task_id": "task-execution-error"},
+        runtime="container",
+        dry_run=True,
+        requests=requests,
+        policy_context=_context(requests[0]),
+        on_run=saved.append,
+    )
+
+    assert calls == [item.request_id for item in requests]
+    assert saved == result.runs
+    assert [item.request_id for item in result.runs] == [item.request_id for item in requests]
+    assert [item.failure_kind for item in result.runs] == ["", "orchestration_error", ""]
+    assert raw not in json.dumps([item.model_dump(mode="json") for item in result.runs], sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        pytest.param({"task_id": "other-task"}, id="task-id"),
+        pytest.param({"request_id": "task-returned-identity:other"}, id="request-id"),
+        pytest.param({"runtime": "local"}, id="runtime"),
+        pytest.param({"decision": "deny"}, id="decision"),
+    ),
+)
+def test_returned_run_identity_mismatch_becomes_orchestration_error(tmp_path, changes):
+    request = _three_valid_requests(
+        tmp_path,
+        task_id="task-returned-identity",
+        runtime="container",
+    )[0]
+
+    class MismatchedHarness:
+
+        def execute_one(self, **kwargs):
+            return _successful_run(kwargs["request"]).model_copy(update=changes)
+
+    saved = []
+    result = _runner(harness=MismatchedHarness()).run(
+        task_id=request.task_id,
+        review_input={"task_id": request.task_id},
+        runtime="container",
+        dry_run=True,
+        requests=[request],
+        policy_context=_context(request),
+        on_run=saved.append,
+    )
+
+    assert saved == result.runs
+    assert len(result.runs) == 1
+    assert result.runs[0].task_id == request.task_id
+    assert result.runs[0].request_id == request.request_id
+    assert result.runs[0].runtime == request.runtime
+    assert result.runs[0].decision == "allow"
+    assert result.runs[0].failure_kind == "orchestration_error"
+
+
+def test_successful_returned_run_discards_stale_failure_fields(tmp_path):
+    request = _three_valid_requests(
+        tmp_path,
+        task_id="task-success-audit",
+        runtime="container",
+    )[0]
+    raw = "returned-success-secret-987"
+
+    class StaleFailureHarness:
+
+        def execute_one(self, **kwargs):
+            return _successful_run(kwargs["request"]).model_copy(
+                update={
+                    "failure_kind": "execution_nonzero",
+                    "failure_reason": f"stale failure client_secret={raw}",
+                    "warning": f"advisory client_secret={raw}",
+                })
+
+    saved = []
+    result = _runner(harness=StaleFailureHarness()).run(
+        task_id=request.task_id,
+        review_input={"task_id": request.task_id},
+        runtime="container",
+        dry_run=True,
+        requests=[request],
+        policy_context=_context(request),
+        on_run=saved.append,
+    )
+
+    assert saved == result.runs
+    assert len(result.runs) == 1
+    assert result.runs[0].failure_kind == ""
+    assert result.runs[0].failure_reason == ""
+    assert result.runs[0].warning.startswith("advisory ")
+    assert raw not in json.dumps(result.runs[0].model_dump(mode="json"), sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("changes", "failure_kind", "reason_field", "raw"),
+    (
+        pytest.param(
+            {
+                "timed_out": True,
+                "exit_code": -1,
+                "failure_kind": "runtime_unavailable",
+                "failure_reason": "stale failure client_secret=returned-timeout-secret-987",
+                "warning": "timeout warning client_secret=returned-timeout-secret-987",
+                "stderr": "timeout stderr client_secret=returned-timeout-secret-987",
+            },
+            "execution_timeout",
+            "warning",
+            "returned-timeout-secret-987",
+            id="timeout"),
+        pytest.param(
+            {
+                "timed_out": False,
+                "exit_code": 7,
+                "failure_kind": "runtime_unavailable",
+                "failure_reason": "stale failure client_secret=returned-nonzero-secret-987",
+                "warning": "",
+                "stderr": "nonzero stderr client_secret=returned-nonzero-secret-987",
+            },
+            "execution_nonzero",
+            "stderr",
+            "returned-nonzero-secret-987",
+            id="nonzero"),
+    ),
+)
+def test_returned_run_failure_is_classified(tmp_path, changes, failure_kind, reason_field, raw):
+    request = _three_valid_requests(
+        tmp_path,
+        task_id="task-run-classification",
+        runtime="container",
+    )[0]
+
+    class ClassifiedHarness:
+
+        def execute_one(self, **kwargs):
+            return _successful_run(kwargs["request"]).model_copy(update=changes)
+
+    result = _runner(harness=ClassifiedHarness()).run(
+        task_id=request.task_id,
+        review_input={"task_id": request.task_id},
+        runtime="container",
+        dry_run=True,
+        requests=[request],
+        policy_context=_context(request),
+    )
+
+    assert len(result.runs) == 1
+    assert result.runs[0].request_id == request.request_id
+    assert result.runs[0].failure_kind == failure_kind
+    assert result.runs[0].failure_reason == getattr(result.runs[0], reason_field)
+    assert result.runs[0].failure_reason
+    assert "stale failure" not in result.runs[0].failure_reason
+    assert raw not in json.dumps(result.runs[0].model_dump(mode="json"), sort_keys=True)
 
 
 def test_same_decision_is_unique_across_tasks(tmp_path):
@@ -588,7 +843,7 @@ def test_allow_decision_is_saved_before_execution(tmp_path):
             rows = storage.query_task(task.task_id)
             assert rows["filter_intercepts"][0]["request_id"] == request.request_id
             events.append("execute")
-            return HarnessExecutionResult(runs=[_successful_run(request)])
+            return _successful_run(request)
 
     request = _request(tmp_path, task_id=task.task_id)
     runner = _runner(harness=OrderingHarness())

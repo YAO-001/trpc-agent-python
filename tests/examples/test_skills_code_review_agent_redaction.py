@@ -28,7 +28,6 @@ from agent.orchestrator import _finalize_persistence_bundle
 from agent.orchestrator import ReviewOrchestrator
 from agent.redaction_boundary import RedactionBoundary
 from agent.report_builder import ReportBuilder
-from agent.sandbox_runner import HarnessExecutionResult
 from agent.secret_redactor import RedactionResult
 from agent.secret_redactor import SecretRedactor
 from agent.storage import ReviewStorage
@@ -490,18 +489,16 @@ def test_raw_secret_never_reaches_report_database_or_logs(tmp_path, monkeypatch,
 
         def execute_one(self, **kwargs):
             request = kwargs["request"]
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox-{request.request_id}",
-                    task_id=request.task_id,
-                    request_id=request.request_id,
-                    runtime=request.runtime,
-                    command=list(request.command_argv),
-                    exit_code=0,
-                    stderr=f"client_secret={raw}",
-                    created_at=DRY_RUN_TIMESTAMP,
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox-{request.request_id}",
+                task_id=request.task_id,
+                request_id=request.request_id,
+                runtime=request.runtime,
+                command=list(request.command_argv),
+                exit_code=0,
+                stderr=f"client_secret={raw}",
+                created_at=DRY_RUN_TIMESTAMP,
+            )
 
     caplog.set_level("DEBUG")
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", SecretBearingHarness)
@@ -551,18 +548,16 @@ def test_composite_output_key_redacts_value_across_persistence_sinks(
 
         def execute_one(self, **kwargs):
             request = kwargs["request"]
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox-{request.request_id}",
-                    task_id=request.task_id,
-                    request_id=request.request_id,
-                    runtime=request.runtime,
-                    command=list(request.command_argv),
-                    exit_code=0,
-                    output_files={output_key: raw},
-                    created_at=DRY_RUN_TIMESTAMP,
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox-{request.request_id}",
+                task_id=request.task_id,
+                request_id=request.request_id,
+                runtime=request.runtime,
+                command=list(request.command_argv),
+                exit_code=0,
+                output_files={output_key: raw},
+                created_at=DRY_RUN_TIMESTAMP,
+            )
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", SecretBearingHarness)
     db_url = f"sqlite:///{tmp_path / 'review.db'}"
@@ -619,16 +614,15 @@ def test_legacy_harness_redactor_records_redactions_without_dynamic_attributes(
             request = kwargs["request"]
             redacted = self.redactor.redact_text(f"client_secret={raw}")
             assert raw not in redacted.text
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox-{request.request_id}",
-                    task_id=request.task_id,
-                    runtime=request.runtime,
-                    command=list(request.command_argv),
-                    stdout=redacted.text,
-                    created_at=DRY_RUN_TIMESTAMP,
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox-{request.request_id}",
+                task_id=request.task_id,
+                request_id=request.request_id,
+                runtime=request.runtime,
+                command=list(request.command_argv),
+                stdout=redacted.text,
+                created_at=DRY_RUN_TIMESTAMP,
+            )
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", LegacyHarness)
 
@@ -691,7 +685,6 @@ def test_trpc_output_sanitization_preserves_redacted_key_collisions():
     )
 
     run = harness._run_from_skill_output(
-        "task-1",
         request,
         {"output_files": [
             {
@@ -771,7 +764,14 @@ index 1111111..2222222 100644
             captures.append(json.loads(json.dumps(review_input, ensure_ascii=False)))
             captures[-1]["owned_input"] = json.loads(owned_path.read_text(encoding="utf-8"))
             owned_paths.append(owned_path)
-            return HarnessExecutionResult(runs=[])
+            return SandboxRun(
+                run_id=f"sandbox-{request.request_id}",
+                task_id=request.task_id,
+                request_id=request.request_id,
+                runtime=request.runtime,
+                command=list(request.command_argv),
+                created_at=DRY_RUN_TIMESTAMP,
+            )
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", CapturingHarness)
     report = ReviewOrchestrator(

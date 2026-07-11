@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Boolean
+from sqlalchemy import CheckConstraint
 from sqlalchemy import Column
 from sqlalchemy import Float
 from sqlalchemy import ForeignKey
@@ -21,6 +22,7 @@ from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 from sqlalchemy import create_engine
 from sqlalchemy import delete
 from sqlalchemy import event
@@ -95,7 +97,7 @@ sandbox_runs = Table(
     metadata,
     Column("run_id", String(160), primary_key=True),
     Column("task_id", String(128), ForeignKey("review_tasks.task_id", ondelete="CASCADE"), nullable=False),
-    Column("request_id", String(160), nullable=False, server_default=""),
+    Column("request_id", String(160), nullable=False),
     Column("runtime", String(64), nullable=False),
     Column("command_json", Text, nullable=False),
     Column("decision", String(64), nullable=False),
@@ -114,6 +116,8 @@ sandbox_runs = Table(
     Column("failure_reason", Text, nullable=True),
     Column("warning", Text, nullable=False),
     Column("created_at", String(64), nullable=False),
+    CheckConstraint("request_id <> ''", name="ck_sandbox_runs_request_id_nonempty"),
+    UniqueConstraint("task_id", "request_id", name="uq_sandbox_runs_task_request"),
 )
 findings = Table(
     "findings",
@@ -136,14 +140,22 @@ filter_intercepts = Table(
     metadata,
     Column("intercept_id", String(160), primary_key=True),
     Column("task_id", String(128), ForeignKey("review_tasks.task_id", ondelete="CASCADE"), nullable=False),
-    Column("request_id", String(160), nullable=False, server_default=""),
+    Column("request_id", String(160), nullable=False),
     Column("decision", String(64), nullable=False),
-    Column("error_kind", String(64), nullable=False, server_default=""),
+    Column("error_kind", String(64), nullable=False),
     Column("reason", Text, nullable=False),
     Column("command_json", Text, nullable=False),
     Column("runtime", String(64), nullable=False),
     Column("metadata_json", Text, nullable=False),
     Column("created_at", String(64), nullable=False),
+    CheckConstraint("request_id <> ''", name="ck_filter_intercepts_request_id_nonempty"),
+    CheckConstraint(
+        "(decision = 'allow' AND error_kind = '') OR "
+        "(decision = 'deny' AND error_kind = 'policy_denied') OR "
+        "(decision = 'needs_human_review' AND error_kind = 'approval_required')",
+        name="ck_filter_intercepts_decision_error_kind",
+    ),
+    UniqueConstraint("task_id", "request_id", name="uq_filter_intercepts_task_request"),
 )
 telemetry_summaries = Table(
     "telemetry_summaries",
@@ -176,22 +188,8 @@ reports = Table(
 
 Index("idx_review_inputs_task_id", review_inputs.c.task_id)
 Index("idx_sandbox_runs_task_id", sandbox_runs.c.task_id)
-Index(
-    "uq_sandbox_runs_task_request_nonempty",
-    sandbox_runs.c.task_id,
-    sandbox_runs.c.request_id,
-    unique=True,
-    sqlite_where=sandbox_runs.c.request_id != "",
-)
 Index("idx_findings_task_id", findings.c.task_id)
 Index("idx_filter_intercepts_task_id", filter_intercepts.c.task_id)
-Index(
-    "uq_filter_intercepts_task_request_nonempty",
-    filter_intercepts.c.task_id,
-    filter_intercepts.c.request_id,
-    unique=True,
-    sqlite_where=filter_intercepts.c.request_id != "",
-)
 Index("idx_telemetry_summaries_task_id", telemetry_summaries.c.task_id)
 Index("idx_reports_task_id", reports.c.task_id)
 

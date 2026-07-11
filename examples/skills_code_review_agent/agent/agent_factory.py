@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import shlex
 import tempfile
@@ -155,11 +156,14 @@ def build_execution_requests(
     runtime: str,
     input_path: str,
 ) -> tuple[ExecutionRequest, ...]:
+    normalized_runtime = "container" if runtime == "auto" else runtime
+    if normalized_runtime not in {"container", "local"}:
+        raise ValueError(f"unsupported execution runtime {runtime!r}")
     return tuple(
         ExecutionRequest.from_skill_run_args(
             request_id=f"{task_id}:skill-run:{index}",
             task_id=task_id,
-            runtime=runtime,
+            runtime=normalized_runtime,
             args=args,
         ) for index, args in enumerate(build_skill_run_calls(input_path), start=1))
 
@@ -207,11 +211,34 @@ def make_review_before_tool_callback(
     policy: ReviewExecutionPolicy,
     policy_context: PolicyContext,
     requests_by_command: Mapping[tuple[str, ...], ExecutionRequest],
+    *,
+    canonical_args_by_command: Mapping[tuple[str, ...], Mapping[str, Any]] | None = None,
 ):
     """Build an SDK callback that guards an already-approved request."""
     expected_by_command = {tuple(command): request for command, request in requests_by_command.items()}
     if not expected_by_command:
         raise ValueError("requests_by_command must contain at least one validated request")
+    if canonical_args_by_command is None:
+        canonical_by_command = {
+            command: request.to_skill_run_args()
+            for command, request in expected_by_command.items()
+        }
+    else:
+        canonical_by_command = {
+            tuple(command): copy.deepcopy(dict(args))
+            for command, args in canonical_args_by_command.items()
+        }
+        if set(canonical_by_command) != set(expected_by_command):
+            raise ValueError("canonical arguments must match every validated request")
+        for command, expected_request in expected_by_command.items():
+            canonical_request = ExecutionRequest.from_skill_run_args(
+                request_id=expected_request.request_id,
+                task_id=expected_request.task_id,
+                runtime=expected_request.runtime,
+                args=canonical_by_command[command],
+            )
+            if canonical_request != expected_request:
+                raise ValueError("canonical arguments do not match validated request")
     representative_request = next(iter(expected_by_command.values()))
 
     def before_tool_callback(context, tool, args, response=None):  # pylint: disable=unused-argument
@@ -256,7 +283,7 @@ def make_review_before_tool_callback(
                 policy._decision("deny", "request changed after validation", actual, policy_context))
         if decision.decision == "allow":
             args.clear()
-            args.update(actual.to_skill_run_args())
+            args.update(copy.deepcopy(canonical_by_command[expected.command_argv]))
             return None
         return _blocked_tool_response(decision)
 

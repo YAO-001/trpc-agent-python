@@ -181,7 +181,7 @@ class FilterIntercept(BaseModel):
 class SandboxRun(BaseModel):
     run_id: str
     task_id: str = ""
-    request_id: str = ""
+    request_id: str
     runtime: str
     command: list[str] = Field(default_factory=list)
     decision: str = "allow"

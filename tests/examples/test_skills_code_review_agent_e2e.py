@@ -18,12 +18,12 @@ import pytest
 from agent import agent_factory
 from agent import sandbox_runner as sandbox_module
 from agent.agent_factory import prepare_execution_plan
+from agent.execution_request import ExecutionRequest
 from agent.filter_policy import ReviewExecutionPolicy
 from agent.input_resolver import EXAMPLE_DIR
 from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
 from agent.sandbox_artifact_loader import load_sandbox_artifacts
-from agent.sandbox_runner import HarnessExecutionResult
 from agent.sandbox_runner import SandboxRunner
 from agent.secret_redactor import SecretRedactor
 from agent.storage import ReviewStorage
@@ -208,17 +208,16 @@ def test_runner_evaluates_supplied_requests_then_executes_allowed_requests_in_id
 
         def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
             events.append(("execute", request.request_id))
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox_{request.request_id}",
-                    task_id=task_id,
-                    runtime=request.runtime,
-                    command=list(request.command_argv),
-                    decision="allow",
-                    output_files={},
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox_{request.request_id}",
+                task_id=task_id,
+                request_id=request.request_id,
+                runtime=request.runtime,
+                command=list(request.command_argv),
+                decision="allow",
+                output_files={},
+                created_at="1970-01-01T00:00:00+00:00",
+            )
 
     runner = SandboxRunner(
         example_dir=EXAMPLE_DIR,
@@ -293,10 +292,119 @@ def test_explicit_local_harness_does_not_inherit_sensitive_host_env(monkeypatch)
     assert captured_envs
     assert all(name not in captured_envs[0] for name in host_values)
     assert captured_envs[0]["PYTHONUNBUFFERED"] == "1"
-    assert captured_envs[0]["TRPC_AGENT_SKILL_NAME"] == "code-review"
     serialized_output = json.dumps(result.runs[0].output_files, sort_keys=True)
     for raw_value in host_values.values():
         assert raw_value not in serialized_output
+
+
+def test_explicit_local_harness_uses_only_the_request_contract(monkeypatch):
+    captured = {}
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-local-contract", "fixture_names": []}
+
+    with prepare_execution_plan(task_id="task-local-contract",
+                                runtime="local",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        request = plan.requests[2]
+
+        def capture_run(command, **kwargs):
+            captured.update(kwargs)
+            captured["command"] = command
+            cwd = Path(kwargs["cwd"])
+            workspace_root = cwd.parents[1]
+            input_path = workspace_root.joinpath(*request.inputs[0].dst.split("/"))
+            assert input_path.read_text(encoding="utf-8")
+            output_path = workspace_root.joinpath(*request.output_spec.globs[0].split("/"))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("{}", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", capture_run)
+        result = runner.run(
+            task_id=request.task_id,
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[request],
+            policy_context=plan.policy_context,
+        )
+
+    expected_env = sandbox_module._inherited_platform_env(
+        sandbox_module.os.environ,
+        platform_name=sandbox_module.os.name,
+    )
+    expected_env.update({item.name: item.value for item in request.env})
+    assert captured["command"] == [sys.executable, *request.command_argv[1:]]
+    assert Path(captured["cwd"]).as_posix().endswith(request.cwd.removeprefix("$SKILLS_DIR"))
+    assert captured["input"] == request.stdin
+    assert captured["timeout"] == request.timeout_seconds
+    assert captured["env"] == expected_env
+    assert result.runs[0].command == list(request.command_argv)
+    assert result.runs[0].output_files == {"out/smoke.json": "{}"}
+    assert result.runs[0].output_truncated is False
+
+
+@pytest.mark.parametrize(
+    ("raw_files", "max_file_bytes", "max_total_bytes", "expected"),
+    (
+        pytest.param(
+            {
+                "out/a.json": "1234",
+                "out/b.json": "5678",
+            },
+            4,
+            6,
+            {
+                "out/a.json": "1234",
+                "out/b.json": "56",
+            },
+            id="multiple-files",
+        ),
+        pytest.param(
+            {"out/a.json": "abcdefgh"},
+            10,
+            5,
+            {"out/a.json": "abcde"},
+            id="single-file",
+        ),
+        pytest.param(
+            {"out/a.json": "你a"},
+            10,
+            3,
+            {"out/a.json": "你"},
+            id="utf8-byte-boundary",
+        ),
+        pytest.param(
+            {
+                "out/a.json": "1234",
+                "out/b.json": "5678",
+                "out/c.json": "9",
+            },
+            4,
+            4,
+            {"out/a.json": "1234"},
+            id="exhausted-budget",
+        ),
+    ),
+)
+def test_sandbox_output_mapping_enforces_aggregate_request_budget(raw_files, max_file_bytes, max_total_bytes, expected):
+    output_files, truncated = sandbox_module._sanitize_output_mapping(
+        raw_files,
+        boundary=sandbox_module.RedactionBoundary(),
+        already_truncated=False,
+        max_files=len(raw_files),
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+
+    assert output_files == expected
+    assert sum(len(content.encode("utf-8")) for content in output_files.values()) <= max_total_bytes
+    assert truncated is True
 
 
 def _install_sdk_output_toolset(monkeypatch, *, mutate_args, output, handler_calls):
@@ -364,8 +472,11 @@ def test_skill_run_sdk_blocked_response_never_becomes_allow_run(monkeypatch):
         )
 
     assert handler_calls == []
-    assert result.runs == []
-    assert on_runs == []
+    assert len(result.runs) == 1
+    assert on_runs == result.runs
+    assert result.runs[0].request_id == plan.requests[0].request_id
+    assert result.runs[0].decision == "allow"
+    assert result.runs[0].failure_kind == "orchestration_error"
     assert result.needs_human_review
     assert "integrity" in result.needs_human_review[0].message.lower()
 
@@ -399,7 +510,9 @@ def test_skill_run_non_mapping_sdk_output_fails_closed(monkeypatch):
         )
 
     assert len(handler_calls) == 1
-    assert result.runs == []
+    assert len(result.runs) == 1
+    assert result.runs[0].request_id == plan.requests[0].request_id
+    assert result.runs[0].failure_kind == "orchestration_error"
     assert result.needs_human_review
 
 
@@ -449,6 +562,55 @@ def test_skill_run_handler_receives_callback_canonicalized_plain_dict(monkeypatc
     assert handler_calls == [canonical_args]
     assert len(result.runs) == 1
     assert result.runs[0].decision == "allow"
+
+
+def test_container_serializes_each_execution_request_once(monkeypatch):
+    calls = []
+    handler_calls = []
+    original = ExecutionRequest.to_skill_run_args
+
+    def counted(self):
+        calls.append(self.request_id)
+        return original(self)
+
+    monkeypatch.setattr(ExecutionRequest, "to_skill_run_args", counted)
+    _install_sdk_output_toolset(
+        monkeypatch,
+        mutate_args=lambda args: None,
+        output={
+            "exit_code": 0,
+            "timed_out": False,
+            "duration_ms": 0,
+            "stdout": "",
+            "stderr": "",
+            "output_files": [],
+            "warnings": [],
+        },
+        handler_calls=handler_calls,
+    )
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    review_input = {"task_id": "task-single-serialization", "fixture_names": []}
+
+    with prepare_execution_plan(task_id="task-single-serialization",
+                                runtime="container",
+                                review_input=review_input,
+                                redactor=SecretRedactor()) as plan:
+        request = plan.requests[0]
+        result = runner.run(
+            task_id=request.task_id,
+            review_input=review_input,
+            runtime="container",
+            dry_run=True,
+            requests=[request],
+            policy_context=plan.policy_context,
+        )
+
+    assert calls == [request.request_id]
+    assert len(handler_calls) == len(result.runs) == 1
 
 
 def test_skill_static_review_emits_real_security_finding(tmp_path):
@@ -580,6 +742,7 @@ def test_sandbox_artifact_invalid_schema_becomes_human_review_warning():
         SandboxRun(
             run_id="sandbox_bad_json",
             task_id="task-artifact",
+            request_id="task-artifact:bad-json",
             runtime="local",
             command=["python3", "scripts/run_static_review.py"],
             output_files={"out/findings.json": "{not-json"},
@@ -587,6 +750,7 @@ def test_sandbox_artifact_invalid_schema_becomes_human_review_warning():
         SandboxRun(
             run_id="sandbox_bad_finding",
             task_id="task-artifact",
+            request_id="task-artifact:bad-finding",
             runtime="local",
             command=["python3", "scripts/run_static_review.py"],
             output_files={
@@ -766,17 +930,16 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
             output_files = ({
                 "out/findings.json": json.dumps(payload)
             } if request.command_argv[1] == "scripts/run_static_review.py" else {})
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
-                    task_id=task_id,
-                    runtime=self.runtime,
-                    command=list(request.command_argv),
-                    decision="allow",
-                    output_files=output_files,
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
+                task_id=task_id,
+                request_id=request.request_id,
+                runtime=self.runtime,
+                command=list(request.command_argv),
+                decision="allow",
+                output_files=output_files,
+                created_at="1970-01-01T00:00:00+00:00",
+            )
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", FakeTrpcSkillToolSetHarness)
 
@@ -816,17 +979,16 @@ def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monke
             output_files = ({
                 "out/findings.json": json.dumps(payload)
             } if request.command_argv[1] == "scripts/run_static_review.py" else {})
-            return HarnessExecutionResult(runs=[
-                SandboxRun(
-                    run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
-                    task_id=task_id,
-                    runtime=self.runtime,
-                    command=list(request.command_argv),
-                    decision="allow",
-                    output_files=output_files,
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-            ])
+            return SandboxRun(
+                run_id=f"sandbox_{task_id}_{request.request_id.rsplit(':', 1)[-1]}",
+                task_id=task_id,
+                request_id=request.request_id,
+                runtime=self.runtime,
+                command=list(request.command_argv),
+                decision="allow",
+                output_files=output_files,
+                created_at="1970-01-01T00:00:00+00:00",
+            )
 
     monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", FakeTrpcSkillToolSetHarness)
     db_url = f"sqlite:///{tmp_path / 'review.db'}"
@@ -892,7 +1054,12 @@ def test_auto_runtime_stays_container_when_container_execution_fails(tmp_path, m
     assert report.input_summary["effective_runtime"] == "container"
     assert report.telemetry.filter_needs_review_count == 0
     assert any(warning.title == "container runtime failed" for warning in report.needs_human_review)
-    assert report.sandbox_runs == []
+    assert len(report.sandbox_runs) == 3
+    assert all(run.runtime == "container" for run in report.sandbox_runs)
+    assert {run.failure_kind for run in report.sandbox_runs} == {"orchestration_error"}
+    assert [run.request_id for run in report.sandbox_runs] == sorted(item.request_id
+                                                                     for item in report.filter_intercepts
+                                                                     if item.decision == "allow")
 
 
 def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypatch):
@@ -919,7 +1086,6 @@ def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypat
     assert smoke["secret_token_in_env"] is False
 
     monkeypatch.setattr(sandbox_module, "MAX_STDOUT_CHARS", 24)
-    monkeypatch.setattr(sandbox_module, "MAX_OUTPUT_FILE_BYTES", 96)
     large_input = {
         "task_id": "task-large-output",
         "fixture_names": [],
@@ -929,12 +1095,20 @@ def test_local_sandbox_truncates_large_output_and_scrubs_env(tmp_path, monkeypat
                                 runtime="local",
                                 review_input=large_input,
                                 redactor=SecretRedactor()) as plan:
+        output_spec = plan.requests[2].output_spec.model_copy(update={
+            "max_file_bytes": 96,
+            "max_total_bytes": 96,
+        })
+        request = plan.requests[2].model_copy(update={
+            "output_spec": output_spec,
+            "output_budget_bytes": 96,
+        })
         large_result = runner.run(
             task_id="task-large-output",
             review_input=large_input,
             runtime="local",
             dry_run=True,
-            requests=[plan.requests[2]],
+            requests=[request],
             policy_context=plan.policy_context,
         )
     run = large_result.runs[0]

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS review_inputs (
 CREATE TABLE IF NOT EXISTS sandbox_runs (
     run_id VARCHAR(160) PRIMARY KEY,
     task_id VARCHAR(128) NOT NULL,
-    request_id VARCHAR(160) NOT NULL DEFAULT '',
+    request_id VARCHAR(160) NOT NULL,
     runtime VARCHAR(64) NOT NULL,
     command_json TEXT NOT NULL,
     decision VARCHAR(64) NOT NULL,
@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS sandbox_runs (
     failure_reason TEXT,
     warning TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL,
+    CONSTRAINT ck_sandbox_runs_request_id_nonempty CHECK (request_id <> ''),
+    CONSTRAINT uq_sandbox_runs_task_request UNIQUE (task_id, request_id),
     FOREIGN KEY (task_id) REFERENCES review_tasks(task_id) ON DELETE CASCADE
 );
 
@@ -70,14 +72,24 @@ CREATE TABLE IF NOT EXISTS findings (
 CREATE TABLE IF NOT EXISTS filter_intercepts (
     intercept_id VARCHAR(160) PRIMARY KEY,
     task_id VARCHAR(128) NOT NULL,
-    request_id VARCHAR(160) NOT NULL DEFAULT '',
+    request_id VARCHAR(160) NOT NULL,
     decision VARCHAR(64) NOT NULL,
-    error_kind VARCHAR(64) NOT NULL DEFAULT '',
+    error_kind VARCHAR(64) NOT NULL,
     reason TEXT NOT NULL,
     command_json TEXT NOT NULL,
     runtime VARCHAR(64) NOT NULL,
     metadata_json TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL,
+    CONSTRAINT ck_filter_intercepts_request_id_nonempty CHECK (request_id <> ''),
+    CONSTRAINT ck_filter_intercepts_decision_error_kind CHECK (
+        (decision = 'allow' AND error_kind = '')
+        OR (decision = 'deny' AND error_kind = 'policy_denied')
+        OR (
+            decision = 'needs_human_review'
+            AND error_kind = 'approval_required'
+        )
+    ),
+    CONSTRAINT uq_filter_intercepts_task_request UNIQUE (task_id, request_id),
     FOREIGN KEY (task_id) REFERENCES review_tasks(task_id) ON DELETE CASCADE
 );
 
@@ -101,11 +113,7 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX IF NOT EXISTS idx_review_inputs_task_id ON review_inputs(task_id);
 CREATE INDEX IF NOT EXISTS idx_sandbox_runs_task_id ON sandbox_runs(task_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_sandbox_runs_task_request_nonempty
-    ON sandbox_runs(task_id, request_id) WHERE request_id <> '';
 CREATE INDEX IF NOT EXISTS idx_findings_task_id ON findings(task_id);
 CREATE INDEX IF NOT EXISTS idx_filter_intercepts_task_id ON filter_intercepts(task_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_filter_intercepts_task_request_nonempty
-    ON filter_intercepts(task_id, request_id) WHERE request_id <> '';
 CREATE INDEX IF NOT EXISTS idx_telemetry_summaries_task_id ON telemetry_summaries(task_id);
 CREATE INDEX IF NOT EXISTS idx_reports_task_id ON reports(task_id);

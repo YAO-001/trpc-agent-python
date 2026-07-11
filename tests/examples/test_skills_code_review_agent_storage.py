@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from agent.models import Finding
 from agent.models import RedactionSummary
@@ -17,6 +18,7 @@ from agent.models import ReviewTask
 from agent.models import ReviewTaskStatus
 from agent.models import SandboxRun
 from agent.models import TelemetrySummary
+from agent.storage import MIGRATIONS_DIR
 from agent.storage import ReviewStorage
 from agent.task_state import transition_task
 
@@ -222,11 +224,90 @@ def _index_exists(
 
 def test_new_database_records_all_bundled_migrations(tmp_path):
     storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
 
     with storage.engine.connect() as conn:
         versions = conn.exec_driver_sql("SELECT version FROM schema_migrations ORDER BY version").scalars().all()
 
-    assert versions == ["002_review_lifecycle"]
+    assert versions == ["002_review_lifecycle", "003_request_identity"]
+
+
+def _storage_with_constraint_parent(tmp_path, database_kind):
+    if database_kind == "legacy":
+        storage = ReviewStorage(_create_legacy_database(tmp_path))
+        return storage, "legacy-task"
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    task = ReviewTask(
+        task_id="constraint-task",
+        input_type="fixture",
+        dry_run=True,
+    )
+    storage.save_task(task)
+    return storage, task.task_id
+
+
+@pytest.mark.parametrize("database_kind", ("fresh", "legacy"))
+@pytest.mark.parametrize("table", ("sandbox_runs", "filter_intercepts"))
+def test_database_rejects_empty_request_identity(tmp_path, database_kind, table):
+    storage, task_id = _storage_with_constraint_parent(tmp_path, database_kind)
+    if table == "sandbox_runs":
+        statement = """
+            INSERT INTO sandbox_runs (
+                run_id, task_id, request_id, runtime, command_json, decision,
+                exit_code, timed_out, duration_ms, stdout, stderr,
+                output_files_json, stdout_truncated, stderr_truncated,
+                output_truncated, output_file_count, output_bytes, failure_kind,
+                failure_reason, warning, created_at
+            ) VALUES (
+                :row_id, :task_id, '', 'container', '[]', 'allow',
+                0, 0, 0, '', '', '{}', 0, 0, 0, 0, 0, '', '', '', :created_at
+            )
+        """
+    else:
+        statement = """
+            INSERT INTO filter_intercepts (
+                intercept_id, task_id, request_id, decision, error_kind,
+                reason, command_json, runtime, metadata_json, created_at
+            ) VALUES (
+                :row_id, :task_id, '', 'allow', '',
+                'canonical decision', '[]', 'container', '{}', :created_at
+            )
+        """
+    with pytest.raises(IntegrityError):
+        with storage.engine.begin() as conn:
+            conn.exec_driver_sql(
+                statement,
+                {
+                    "row_id": f"{database_kind}-{table}-empty",
+                    "task_id": task_id,
+                    "created_at": "1970-01-01T00:00:00+00:00",
+                },
+            )
+
+
+@pytest.mark.parametrize("database_kind", ("fresh", "legacy"))
+def test_database_rejects_mismatched_filter_decision_error_kind(tmp_path, database_kind):
+    storage, task_id = _storage_with_constraint_parent(tmp_path, database_kind)
+
+    with pytest.raises(IntegrityError):
+        with storage.engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                INSERT INTO filter_intercepts (
+                    intercept_id, task_id, request_id, decision, error_kind,
+                    reason, command_json, runtime, metadata_json, created_at
+                ) VALUES (
+                    :row_id, :task_id, :request_id, 'allow', 'policy_denied',
+                    'mismatched taxonomy', '[]', 'container', '{}', :created_at
+                )
+                """,
+                {
+                    "row_id": f"{database_kind}-mismatched-filter",
+                    "task_id": task_id,
+                    "request_id": f"{task_id}:mismatched-filter",
+                    "created_at": "1970-01-01T00:00:00+00:00",
+                },
+            )
 
 
 def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
@@ -259,14 +340,14 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
             "sandbox_runs",
             ["task_id", "request_id"],
             unique=True,
-            partial=True,
+            partial=False,
         )
         assert _index_exists(
             conn,
             "filter_intercepts",
             ["task_id", "request_id"],
             unique=True,
-            partial=True,
+            partial=False,
         )
         task_row = conn.exec_driver_sql(
             "SELECT updated_at, failure_kind, failure_reason_redacted FROM review_tasks").one()
@@ -284,10 +365,71 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
 
     repeated = ReviewStorage(db_url)
     with repeated.engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT count(*) FROM schema_migrations "
-                                    "WHERE version='002_review_lifecycle'").scalar_one() == 1
+        versions = conn.exec_driver_sql("SELECT version, count(*) FROM schema_migrations "
+                                        "GROUP BY version ORDER BY version").all()
+        assert versions == [
+            ("002_review_lifecycle", 1),
+            ("003_request_identity", 1),
+        ]
         assert conn.exec_driver_sql("SELECT count(*) FROM sandbox_runs").scalar_one() == 1
         assert conn.exec_driver_sql("SELECT count(*) FROM filter_intercepts").scalar_one() == 1
+
+
+def test_request_identity_migration_backfills_only_empty_ids_and_preserves_audit_fields(tmp_path):
+    db_url = _create_legacy_database(tmp_path)
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript((MIGRATIONS_DIR / "002_review_lifecycle.sql").read_text(encoding="utf-8"))
+        conn.execute("INSERT INTO schema_migrations (version) VALUES ('002_review_lifecycle')")
+        conn.execute("UPDATE sandbox_runs SET request_id = '', failure_kind = 'orchestration_error'")
+        conn.execute("UPDATE filter_intercepts SET request_id = ''")
+        conn.execute("""
+            INSERT INTO sandbox_runs
+            SELECT
+                'kept-run', task_id, 'kept-request', runtime, command_json,
+                decision, exit_code, timed_out, duration_ms, stdout, stderr,
+                output_files_json, stdout_truncated, stderr_truncated,
+                output_truncated, output_file_count, output_bytes,
+                'execution_nonzero', failure_reason, warning, created_at
+            FROM sandbox_runs
+            WHERE run_id = 'legacy-run'
+        """)
+        conn.execute("""
+            INSERT INTO filter_intercepts
+            SELECT
+                'kept-intercept', task_id, 'kept-filter-request', decision,
+                error_kind, reason, command_json, runtime, metadata_json,
+                created_at
+            FROM filter_intercepts
+            WHERE intercept_id = 'legacy-intercept'
+        """)
+
+    storage = ReviewStorage(db_url)
+    with storage.engine.connect() as conn:
+        runs = {
+            row.run_id: (row.request_id, row.failure_kind)
+            for row in conn.exec_driver_sql("SELECT run_id, request_id, failure_kind FROM sandbox_runs").all()
+        }
+        decisions = {
+            row.intercept_id: (row.request_id, row.decision, row.error_kind)
+            for row in conn.exec_driver_sql(
+                "SELECT intercept_id, request_id, decision, error_kind FROM filter_intercepts").all()
+        }
+        versions = conn.exec_driver_sql(
+            "SELECT version, count(*) FROM schema_migrations GROUP BY version ORDER BY version").all()
+
+    assert runs == {
+        "legacy-run": ("legacy:legacy-run", "orchestration_error"),
+        "kept-run": ("kept-request", "execution_nonzero"),
+    }
+    assert decisions == {
+        "legacy-intercept": ("legacy:legacy-intercept", "deny", "policy_denied"),
+        "kept-intercept": ("kept-filter-request", "deny", "policy_denied"),
+    }
+    assert versions == [
+        ("002_review_lifecycle", 1),
+        ("003_request_identity", 1),
+    ]
 
 
 def test_legacy_migration_with_orphan_never_records_success_or_skips_retry(tmp_path):
@@ -401,6 +543,7 @@ def test_storage_roundtrip_by_task_id(tmp_path):
         SandboxRun(
             run_id="sandbox-task-storage-1",
             task_id=task.task_id,
+            request_id=f"{task.task_id}:skill-run:1",
             runtime="local",
             command=["python3", "scripts/run_static_review.py"],
             decision="allow",
