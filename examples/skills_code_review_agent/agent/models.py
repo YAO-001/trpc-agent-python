@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from datetime import datetime
 from datetime import timezone
 from enum import Enum
@@ -210,8 +211,43 @@ class SandboxRun(BaseModel):
         return self
 
 
+def terminal_status(
+    *,
+    task_id: str,
+    required_request_ids: set[str],
+    decisions: list[FilterIntercept],
+    runs: list[SandboxRun],
+) -> ReviewTaskStatus:
+    """Derive a truthful terminal state from the complete execution audit."""
+    if not required_request_ids:
+        return ReviewTaskStatus.FAILED
+    if any(item.task_id != task_id or item.request_id not in required_request_ids
+           or item.decision not in {"allow", "deny", "needs_human_review"} for item in decisions):
+        return ReviewTaskStatus.FAILED
+    decision_counts = Counter(item.request_id for item in decisions)
+    if set(decision_counts) != required_request_ids or any(count != 1 for count in decision_counts.values()):
+        return ReviewTaskStatus.FAILED
+    allow_ids = {item.request_id for item in decisions if item.decision == "allow"}
+    non_allow_ids = {item.request_id for item in decisions if item.decision in {"deny", "needs_human_review"}}
+    if any(item.task_id != task_id or item.request_id not in allow_ids or item.decision != "allow" for item in runs):
+        return ReviewTaskStatus.FAILED
+    run_counts = Counter(item.request_id for item in runs)
+    if set(run_counts) != allow_ids or any(count != 1 for count in run_counts.values()):
+        return ReviewTaskStatus.FAILED
+    if non_allow_ids:
+        return ReviewTaskStatus.BLOCKED
+    run_by_request = {item.request_id: item for item in runs}
+    required_runs = [run_by_request[item] for item in sorted(allow_ids)]
+    if any(item.failure_kind in {"runtime_unavailable", "orchestration_error"} for item in required_runs):
+        return ReviewTaskStatus.FAILED
+    if any(item.failure_kind or item.exit_code != 0 or item.timed_out for item in required_runs):
+        return ReviewTaskStatus.COMPLETED_WITH_ERRORS
+    return ReviewTaskStatus.COMPLETED
+
+
 class TelemetrySummary(BaseModel):
     task_id: str
+    task_status: ReviewTaskStatus
     elapsed_ms: int = 0
     files_changed: int = 0
     lines_added: int = 0
@@ -245,8 +281,9 @@ class RedactionSummary(BaseModel):
 
 
 class ReviewReport(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "2.0"
     task_id: str
+    task_status: ReviewTaskStatus
     conclusion: str
     findings: list[Finding] = Field(default_factory=list)
     warnings: list[ReviewWarning] = Field(default_factory=list)
@@ -258,6 +295,15 @@ class ReviewReport(BaseModel):
     section_summary: dict[str, Any] = Field(default_factory=dict)
     redaction_summary: RedactionSummary = Field(default_factory=RedactionSummary)
     recommendations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_terminal_identity(self) -> "ReviewReport":
+        if self.telemetry.task_id != self.task_id:
+            raise ValueError("report and telemetry task identity must match")
+        if self.telemetry.task_status != self.task_status:
+            raise ValueError("report and telemetry task status must match")
+        return self
+
     database_query: str = ""
     report_paths: dict[str, str] = Field(default_factory=dict)
     input_summary: dict[str, Any] = Field(default_factory=dict)

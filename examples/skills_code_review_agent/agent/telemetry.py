@@ -12,6 +12,7 @@ from .models import Finding
 from .models import ParsedDiff
 from .models import RedactionSummary
 from .models import ReviewWarning
+from .models import ReviewTaskStatus
 from .models import SandboxRun
 from .models import TelemetrySummary
 from .models import utc_now
@@ -20,6 +21,7 @@ from .models import utc_now
 def build_telemetry(
     *,
     task_id: str,
+    task_status: ReviewTaskStatus,
     parsed_diff: ParsedDiff,
     findings: list[Finding],
     warnings: list[ReviewWarning],
@@ -33,6 +35,7 @@ def build_telemetry(
 ) -> TelemetrySummary:
     return TelemetrySummary(
         task_id=task_id,
+        task_status=task_status,
         elapsed_ms=0 if dry_run else elapsed_ms,
         files_changed=len(parsed_diff.changed_files),
         lines_added=parsed_diff.total_added_lines,
@@ -42,7 +45,8 @@ def build_telemetry(
         filter_denied_count=sum(1 for item in filter_intercepts if item.decision == "deny"),
         filter_needs_review_count=sum(1 for item in filter_intercepts if item.decision == "needs_human_review"),
         sandbox_runs_count=len(sandbox_runs),
-        sandbox_failures_count=sum(1 for item in sandbox_runs if item.exit_code != 0 or item.timed_out),
+        sandbox_failures_count=sum(1 for item in sandbox_runs
+                                   if item.failure_kind or item.exit_code != 0 or item.timed_out),
         stdout_truncated_count=sum(1 for item in sandbox_runs if item.stdout_truncated),
         stderr_truncated_count=sum(1 for item in sandbox_runs if item.stderr_truncated),
         output_truncated_count=sum(1 for item in sandbox_runs if item.output_truncated),

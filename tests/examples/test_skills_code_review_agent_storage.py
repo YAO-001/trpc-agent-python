@@ -551,7 +551,12 @@ def test_storage_roundtrip_by_task_id(tmp_path):
         )
     ])
     storage.save_findings(task.task_id, [finding])
-    storage.save_telemetry(TelemetrySummary(task_id=task.task_id, findings_count=1))
+    storage.save_telemetry(
+        TelemetrySummary(
+            task_id=task.task_id,
+            task_status=ReviewTaskStatus.COMPLETED,
+            findings_count=1,
+        ))
 
     rows = storage.query_task(task.task_id)
 
@@ -560,6 +565,22 @@ def test_storage_roundtrip_by_task_id(tmp_path):
     assert rows["sandbox_runs"][0]["output_file_count"] == 1
     assert rows["sandbox_runs"][0]["output_bytes"] == 2
     assert "redacted evidence" in storage.dump_task_text(task.task_id)
+
+
+def test_latest_task_uses_task_id_as_deterministic_timestamp_tiebreaker(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    assert storage.latest_task() is None
+    for task_id in ("task-latest-a", "task-latest-b"):
+        storage.save_task(
+            ReviewTask(
+                task_id=task_id,
+                input_type="fixture",
+                dry_run=True,
+                created_at="1970-01-01T00:00:00+00:00",
+                updated_at="1970-01-01T00:00:00+00:00",
+            ))
+
+    assert storage.latest_task().task_id == "task-latest-b"
 
 
 def test_create_task_with_input_persists_both_rows_atomically(tmp_path):

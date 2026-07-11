@@ -1125,14 +1125,33 @@ def test_demo_filter_writes_public_deny_report_without_sandbox_run(tmp_path):
     output_dir = tmp_path / "out"
     report = ReviewOrchestrator(db_url=db_url, output_dir=output_dir).demo_filter(dry_run=True, runtime="local")
 
-    assert (output_dir / "filter_blocked_report.json").is_file()
-    assert (output_dir / "filter_blocked_report.md").is_file()
+    json_path = output_dir / "filter_blocked_report.json"
+    markdown_path = output_dir / "filter_blocked_report.md"
+    assert json_path.is_file()
+    assert markdown_path.is_file()
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    markdown = markdown_path.read_text(encoding="utf-8")
     assert report.sandbox_runs == []
     assert report.filter_intercepts
     assert report.filter_intercepts[0].decision == "deny"
     rows = ReviewStorage(db_url).query_task(report.task_id)
+    metrics = json.loads(rows["telemetry_summaries"][0]["metrics_json"])
+    summary = json.loads(rows["reports"][0]["summary_json"])
+    assert report.schema_version == payload["schema_version"] == "2.0"
+    assert report.task_status == "blocked"
+    assert report.section_summary["task_status"] == "blocked"
+    assert report.telemetry.task_status == "blocked"
+    assert payload["task_status"] == "blocked"
+    assert payload["section_summary"]["task_status"] == "blocked"
+    assert payload["telemetry"]["task_status"] == "blocked"
+    assert rows["task"]["status"] == "blocked"
+    assert metrics["task_status"] == "blocked"
+    assert summary["task_status"] == "blocked"
+    assert "- Status: `blocked`" in markdown
+    assert "policy_denied" in markdown
     assert rows["sandbox_runs"] == []
     assert rows["filter_intercepts"][0]["decision"] == "deny"
+    assert rows["filter_intercepts"][0]["error_kind"] == "policy_denied"
 
 
 def test_filter_deny_before_container_execution_is_persisted(tmp_path, monkeypatch):

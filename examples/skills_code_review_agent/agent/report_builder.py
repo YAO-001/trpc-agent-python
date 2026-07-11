@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -16,6 +17,7 @@ from .models import FilterIntercept
 from .models import Finding
 from .models import RedactionSummary
 from .models import ReviewReport
+from .models import ReviewTaskStatus
 from .models import ReviewWarning
 from .models import SandboxRun
 from .models import TelemetrySummary
@@ -29,7 +31,17 @@ def _severity_distribution(findings: list[Finding]) -> dict[str, int]:
     return {key: value for key, value in distribution.items() if value}
 
 
-def _conclusion(findings: list[Finding], needs_human_review: list[ReviewWarning]) -> str:
+def _conclusion(
+    task_status: ReviewTaskStatus,
+    findings: list[Finding],
+    needs_human_review: list[ReviewWarning],
+) -> str:
+    if task_status == ReviewTaskStatus.BLOCKED:
+        return "Review blocked by execution policy or required human approval."
+    if task_status == ReviewTaskStatus.FAILED:
+        return "Review failed before all required execution completed."
+    if task_status == ReviewTaskStatus.COMPLETED_WITH_ERRORS:
+        return "Review completed with execution errors; inspect sandbox results."
     if any(item.severity in {"critical", "high"} for item in findings):
         return "High-confidence issues require changes before merge."
     if findings:
@@ -65,6 +77,7 @@ def _section_summary(
     recommendations: list[str],
 ) -> dict[str, Any]:
     return {
+        "task_status": telemetry.task_status.value,
         "findings_summary": {
             "findings": len(findings),
             "warnings": len(warnings),
@@ -79,6 +92,11 @@ def _section_summary(
             "denied": telemetry.filter_denied_count,
             "needs_human_review": telemetry.filter_needs_review_count,
             "persisted_intercepts": len(filter_intercepts),
+            "error_kinds": {
+                error_kind: sum(1 for item in filter_intercepts if item.error_kind == error_kind)
+                for error_kind in ("policy_denied", "approval_required")
+                if any(item.error_kind == error_kind for item in filter_intercepts)
+            },
         },
         "metrics": telemetry.model_dump(mode="json"),
         "sandbox_summary": {
@@ -155,6 +173,7 @@ class ReportBuilder:
         self,
         *,
         task_id: str,
+        task_status: ReviewTaskStatus,
         findings: list[Finding],
         warnings: list[ReviewWarning],
         needs_human_review: list[ReviewWarning],
@@ -164,8 +183,42 @@ class ReportBuilder:
         redaction_summary: RedactionSummary,
         input_summary: dict,
     ) -> ReviewReport:
-        query_cmd = ("python examples/skills_code_review_agent/run_review.py query "
-                     f"--db-url {self._display_db_url()} --task-id {task_id}")
+        return self.canonical_report(
+            task_id=task_id,
+            task_status=task_status,
+            findings=findings,
+            warnings=warnings,
+            needs_human_review=needs_human_review,
+            filter_intercepts=filter_intercepts,
+            sandbox_runs=sandbox_runs,
+            telemetry=telemetry,
+            redaction_summary=redaction_summary,
+            input_summary=input_summary,
+        )
+
+    def canonical_report(
+        self,
+        *,
+        task_id: str,
+        task_status: ReviewTaskStatus,
+        findings: list[Finding],
+        warnings: list[ReviewWarning],
+        needs_human_review: list[ReviewWarning],
+        filter_intercepts: list[FilterIntercept],
+        sandbox_runs: list[SandboxRun],
+        telemetry: TelemetrySummary,
+        redaction_summary: RedactionSummary,
+        input_summary: dict,
+        report_paths: dict[str, str] | None = None,
+        database_query: str | None = None,
+    ) -> ReviewReport:
+        """Derive every persisted report field from canonical review inputs."""
+        filter_intercepts = sorted(filter_intercepts, key=lambda item: item.request_id)
+        sandbox_runs = sorted(sandbox_runs, key=lambda item: item.request_id)
+        query_cmd = database_query
+        if query_cmd is None:
+            query_cmd = ("python examples/skills_code_review_agent/run_review.py query "
+                         f"--db-url {self._display_db_url()} --task-id {task_id}")
         severity_distribution = _severity_distribution(findings)
         recommendations = _recommendations(findings, warnings + needs_human_review)
         section_summary = _section_summary(
@@ -180,7 +233,8 @@ class ReportBuilder:
         )
         draft = ReviewReport(
             task_id=task_id,
-            conclusion=_conclusion(findings, needs_human_review),
+            task_status=task_status,
+            conclusion=_conclusion(task_status, findings, needs_human_review),
             findings=findings,
             warnings=warnings,
             needs_human_review=needs_human_review,
@@ -192,6 +246,7 @@ class ReportBuilder:
             redaction_summary=redaction_summary,
             recommendations=recommendations,
             database_query=query_cmd,
+            report_paths=report_paths or {},
             input_summary=input_summary,
         )
         return self._safe_report(draft)
@@ -203,7 +258,27 @@ class ReportBuilder:
         json_name: str = "review_report.json",
         markdown_name: str = "review_report.md",
     ) -> tuple[str, str, ReviewReport]:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_text, markdown, safe_report = self.render(
+            report,
+            json_name=json_name,
+            markdown_name=markdown_name,
+        )
+        self.commit(
+            json_text,
+            markdown,
+            json_name=json_name,
+            markdown_name=markdown_name,
+        )
+        return json_text, markdown, safe_report
+
+    def render(
+        self,
+        report: ReviewReport,
+        *,
+        json_name: str = "review_report.json",
+        markdown_name: str = "review_report.md",
+    ) -> tuple[str, str, ReviewReport]:
+        """Render a final report without mutating the filesystem."""
         json_path = self.output_dir / json_name
         md_path = self.output_dir / markdown_name
         report = report.model_copy(
@@ -214,9 +289,169 @@ class ReportBuilder:
         safe_report = self._safe_report(report)
         json_text = json.dumps(safe_report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2)
         markdown = self._render_markdown(safe_report)
-        json_path.write_text(json_text + "\n", encoding="utf-8")
-        md_path.write_text(markdown, encoding="utf-8")
         return json_text, markdown, safe_report
+
+    def commit(
+        self,
+        json_text: str,
+        markdown: str,
+        *,
+        json_name: str = "review_report.json",
+        markdown_name: str = "review_report.md",
+    ) -> None:
+        """Stage and promote both files, restoring prior output if promotion fails."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = self.output_dir / json_name
+        md_path = self.output_dir / markdown_name
+        nonce = uuid.uuid4().hex
+        json_tmp = self.output_dir / f".{json_name}.{nonce}.tmp"
+        md_tmp = self.output_dir / f".{markdown_name}.{nonce}.tmp"
+        json_backup = self.output_dir / f".{json_name}.{nonce}.bak"
+        md_backup = self.output_dir / f".{markdown_name}.{nonce}.bak"
+        json_backed_up = False
+        markdown_backed_up = False
+        json_promoted = False
+        markdown_promoted = False
+        publication_failure = None
+        rollback_incomplete = False
+        try:
+            json_tmp.write_text(json_text + "\n", encoding="utf-8")
+            md_tmp.write_text(markdown, encoding="utf-8")
+            if json_path.exists():
+                json_path.replace(json_backup)
+                json_backed_up = True
+            if md_path.exists():
+                md_path.replace(md_backup)
+                markdown_backed_up = True
+            json_tmp.replace(json_path)
+            json_promoted = True
+            md_tmp.replace(md_path)
+            markdown_promoted = True
+        except BaseException as exc:
+            publication_failure = exc
+            for path in (json_tmp, md_tmp):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    rollback_incomplete = True
+            for promoted, final in ((json_promoted, json_path), (markdown_promoted, md_path)):
+                if not promoted:
+                    continue
+                try:
+                    final.unlink(missing_ok=True)
+                except OSError:
+                    rollback_incomplete = True
+            for backed_up, backup, final in (
+                (json_backed_up, json_backup, json_path),
+                (markdown_backed_up, md_backup, md_path),
+            ):
+                if not backed_up:
+                    continue
+                try:
+                    backup.replace(final)
+                except OSError:
+                    rollback_incomplete = True
+        if publication_failure is not None:
+            if rollback_incomplete:
+                raise RuntimeError("report publication rollback was incomplete") from None
+            raise publication_failure from None
+        for backup in (json_backup, md_backup):
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _owned_report_paths(
+        self,
+        *,
+        task_id: str,
+        json_name: str,
+        markdown_name: str,
+    ) -> tuple[Path, ...]:
+        json_path = self.output_dir / json_name
+        markdown_path = self.output_dir / markdown_name
+        owned_paths = []
+        if json_path.exists():
+            try:
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("task_id") == task_id:
+                owned_paths.append(json_path)
+        if markdown_path.exists():
+            prefix = "- Task ID: `"
+            for line in markdown_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith(prefix) and line.endswith("`"):
+                    if line[len(prefix):-1] == task_id:
+                        owned_paths.append(markdown_path)
+                    break
+        return tuple(owned_paths)
+
+    def discard(
+        self,
+        *,
+        task_id: str,
+        json_name: str = "review_report.json",
+        markdown_name: str = "review_report.md",
+    ) -> None:
+        """Remove report output only when it belongs to the given task."""
+        failure = None
+        for path in self._owned_report_paths(
+                task_id=task_id,
+                json_name=json_name,
+                markdown_name=markdown_name,
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                if failure is None:
+                    failure = exc
+        public_paths_remain = self._owned_report_paths(
+            task_id=task_id,
+            json_name=json_name,
+            markdown_name=markdown_name,
+        )
+        if failure is not None:
+            raise failure
+        if public_paths_remain:
+            raise OSError("task-owned report discard did not clear public paths")
+
+    def quarantine(
+        self,
+        *,
+        task_id: str,
+        json_name: str = "review_report.json",
+        markdown_name: str = "review_report.md",
+    ) -> None:
+        """Hide task-owned output from public paths without reusing discard."""
+        paths = self._owned_report_paths(
+            task_id=task_id,
+            json_name=json_name,
+            markdown_name=markdown_name,
+        )
+        quarantined = []
+        failure = None
+        nonce = uuid.uuid4().hex
+        for path in paths:
+            if not path.exists():
+                continue
+            hidden = self.output_dir / f".{path.name}.{nonce}.failed"
+            try:
+                path.replace(hidden)
+                quarantined.append(hidden)
+            except OSError as exc:
+                if failure is None:
+                    failure = exc
+        public_paths_remain = any(path.exists() for path in paths)
+        for path in quarantined:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if public_paths_remain:
+            if failure is not None:
+                raise failure
+            raise OSError("task-owned report quarantine did not clear public paths")
 
     def to_markdown(self, report: ReviewReport) -> str:
         return self._render_markdown(self._safe_report(report))
@@ -227,6 +462,7 @@ class ReportBuilder:
             "# Code Review Report",
             "",
             f"- Task ID: `{report.task_id}`",
+            f"- Status: `{report.task_status.value}`",
             f"- Schema version: `{report.schema_version}`",
             f"- Conclusion: {report.conclusion}",
             f"- Database query: `{report.database_query}`",
@@ -275,7 +511,8 @@ class ReportBuilder:
             "",
         ])
         for intercept in report.filter_intercepts:
-            lines.append(f"- {intercept.decision}: `{' '.join(intercept.command)}` - {intercept.reason}")
+            lines.append(f"- {intercept.decision} ({intercept.error_kind or 'none'}): "
+                         f"`{' '.join(intercept.command)}` - {intercept.reason}")
         lines.extend([
             "",
             "## Sandbox Summary",
