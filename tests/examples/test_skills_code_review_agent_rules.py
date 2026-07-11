@@ -14,6 +14,7 @@ from agent.input_resolver import EXAMPLE_DIR
 from agent.models import Finding
 from agent.models import ReviewWarning
 from agent.redaction_boundary import RedactionBoundary
+from agent.result_normalizer import ResultNormalizer
 from agent.rule_engine import RuleEngine
 
 
@@ -21,7 +22,8 @@ def _run_fixture(name: str):
     diff = (EXAMPLE_DIR / "fixtures" / f"{name}.diff").read_text(encoding="utf-8")
     boundary = RedactionBoundary()
     redacted = boundary.text(diff)
-    return RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary), redacted, boundary.summary
+    candidates = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
+    return ResultNormalizer(boundary).normalize(candidates), redacted, boundary.summary
 
 
 def test_every_rule_category_is_covered_by_fixtures():
@@ -80,7 +82,7 @@ index 1111111..2222222 100644
 """
     boundary = RedactionBoundary()
     redacted = boundary.text(diff)
-    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
+    result = ResultNormalizer(boundary).normalize(RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary))
 
     assert raw not in redacted.text
     assert not any(finding.category == "secret" and finding.severity == "high" for finding in result.findings)
@@ -100,7 +102,7 @@ index 1111111..2222222 100644
 """
     boundary = RedactionBoundary()
     redacted = boundary.text(diff)
-    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
+    result = ResultNormalizer(boundary).normalize(RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary))
 
     assert raw not in redacted.text
     finding = next(item for item in result.findings if item.category == "secret")

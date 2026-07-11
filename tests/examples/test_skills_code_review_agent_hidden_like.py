@@ -18,6 +18,8 @@ import pytest
 from agent.diff_parser import parse_unified_diff
 from agent.input_resolver import EXAMPLE_DIR
 from agent.redaction_boundary import RedactionBoundary
+from agent.result_normalizer import ReviewCandidates
+from agent.result_normalizer import ResultNormalizer
 from agent.rule_engine import RuleEngine
 
 SCRIPT = EXAMPLE_DIR / "skills" / "code-review" / "scripts" / "run_static_review.py"
@@ -74,6 +76,19 @@ def _run_static_review(tmp_path: Path, payload: dict[str, Any]) -> dict[str, Any
 
     assert result.returncode == 0, result.stderr
     return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+def _normalize_host(diff: str, boundary: RedactionBoundary):
+    return ResultNormalizer(boundary).normalize(RuleEngine().run(parse_unified_diff(diff), boundary.summary))
+
+
+def _normalize_sandbox(output: dict[str, Any]):
+    return ResultNormalizer(RedactionBoundary()).normalize(
+        ReviewCandidates(
+            findings=output["findings"],
+            warnings=output["warnings"],
+            needs_human_review=output["needs_human_review"],
+        ))
 
 
 def _review_items(output: dict[str, Any]) -> list[dict[str, Any]]:
@@ -197,11 +212,13 @@ def test_hidden_like_low_confidence_secret_routes_to_warning_not_high(tmp_path):
     raw = "dummy-secret-for-tests"
     payload, _ = _redacted_secret_payload(raw)
     output = _run_static_review(tmp_path, payload)
+    normalized = _normalize_sandbox(output)
 
-    assert _high_findings(output) == []
-    warning = next(item for item in [*output["warnings"], *output["needs_human_review"]]
-                   if item["category"] == "secret")
-    assert warning["confidence"] == 0.58
+    assert any(item["category"] == "secret" for item in output["findings"])
+    assert not any(item["category"] == "secret" for item in [*output["warnings"], *output["needs_human_review"]])
+    assert not any(item.category == "secret" for item in normalized.findings)
+    warning = next(item for item in normalized.needs_human_review if item.category == "secret")
+    assert warning.confidence == 0.58
     assert raw not in json.dumps(payload, ensure_ascii=False, sort_keys=True)
     assert raw not in json.dumps(output, ensure_ascii=False, sort_keys=True)
 
@@ -230,18 +247,19 @@ index 1111111..2222222 100644
 @@ -0,0 +1 @@
 +{content}
 """
-    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
-    sandbox = _run_static_review(tmp_path / expected_bucket, payload)
+    host = _normalize_host(diff, boundary)
+    sandbox_output = _run_static_review(tmp_path / expected_bucket, payload)
+    sandbox = _normalize_sandbox(sandbox_output)
 
     host_items = [*host.findings, *host.warnings, *host.needs_human_review]
-    sandbox_items = [*sandbox["findings"], *sandbox["warnings"], *sandbox["needs_human_review"]]
+    sandbox_items = [*sandbox.findings, *sandbox.warnings, *sandbox.needs_human_review]
     host_secret = next(item for item in host_items if item.category == "secret")
-    sandbox_secret = next(item for item in sandbox_items if item["category"] == "secret")
-    assert host_secret.confidence == sandbox_secret["confidence"] == expected_confidence
+    sandbox_secret = next(item for item in sandbox_items if item.category == "secret")
+    assert host_secret.confidence == sandbox_secret.confidence == expected_confidence
     assert bool(host.findings) is (expected_bucket == "finding")
-    assert bool(sandbox["findings"]) is (expected_bucket == "finding")
+    assert bool(sandbox.findings) is (expected_bucket == "finding")
     assert raw not in json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    assert raw not in json.dumps(sandbox, ensure_ascii=False, sort_keys=True)
+    assert raw not in json.dumps(sandbox_output, ensure_ascii=False, sort_keys=True)
 
 
 def test_hidden_like_real_secret_cannot_be_downgraded_by_leading_dummy(tmp_path):
@@ -262,7 +280,7 @@ index 1111111..2222222 100644
 +{content}
 """
 
-    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
+    host = _normalize_host(diff, boundary)
     sandbox = _run_static_review(tmp_path, payload)
 
     host_secret = next(item for item in host.findings if item.category == "secret")
@@ -292,7 +310,7 @@ index 1111111..2222222 100644
 +{content}
 """
 
-    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
+    host = _normalize_host(diff, boundary)
     sandbox = _run_static_review(tmp_path, payload)
 
     host_secret = next(item for item in host.findings if item.category == "secret")
@@ -323,7 +341,7 @@ index 1111111..2222222 100644
 """
     boundary = RedactionBoundary()
     redacted = boundary.text(diff)
-    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
+    result = _normalize_host(redacted.text, boundary)
 
     assert not any(finding.category == "secret" and finding.severity in {"critical", "high"}
                    for finding in result.findings)

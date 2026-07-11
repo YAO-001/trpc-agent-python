@@ -28,11 +28,14 @@ from .execution_request import ExecutionRequest
 from .execution_request import PolicyContext
 from .filter_policy import ReviewExecutionPolicy
 from .models import FilterIntercept
-from .models import Finding
 from .models import ReviewWarning
 from .models import SandboxRun
 from .models import utc_now
 from .redaction_boundary import RedactionBoundary
+from .result_normalizer import PreparedCandidates
+from .result_normalizer import ResultNormalizer
+from .result_normalizer import ReviewCandidates
+from .result_normalizer import merge_prepared_candidates
 from .sandbox_artifact_loader import load_sandbox_artifacts
 from .secret_redactor import SecretRedactor
 
@@ -58,9 +61,7 @@ _WINDOWS_LAUNCH_ENV_KEYS = _POSIX_LAUNCH_ENV_KEYS | frozenset({
 class SandboxResult:
     runs: list[SandboxRun]
     decisions: list[FilterIntercept]
-    findings: list[Finding]
-    warnings: list[ReviewWarning]
-    needs_human_review: list[ReviewWarning]
+    candidates: PreparedCandidates
     effective_runtime: str
 
 
@@ -170,24 +171,6 @@ def _failure_warning(run: SandboxRun, *, boundary: RedactionBoundary) -> ReviewW
     return ReviewWarning.model_validate(payload)
 
 
-def _run_has_human_review_artifact(run: SandboxRun) -> bool:
-    for content in run.output_files.values():
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(data, dict):
-            continue
-        value = data.get("needs_human_review")
-        if value is True:
-            return True
-        if isinstance(value, dict):
-            return True
-        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
-            return True
-    return False
-
-
 def _runtime_warning(title: object, message: object, *, boundary: RedactionBoundary) -> ReviewWarning:
     return ReviewWarning.model_validate(
         boundary.clean({
@@ -197,6 +180,20 @@ def _runtime_warning(title: object, message: object, *, boundary: RedactionBound
             "confidence": 1.0,
             "source": ["sandbox_runner"],
             "needs_human_review": True,
+        }))
+
+
+def _policy_warning(intercept: FilterIntercept, *, boundary: RedactionBoundary) -> ReviewWarning:
+    needs_review = intercept.decision == "needs_human_review"
+    title = ("sandbox request requires policy approval" if needs_review else "sandbox request denied by policy")
+    return ReviewWarning.model_validate(
+        boundary.clean({
+            "category": "sandbox",
+            "title": title,
+            "message": intercept.reason,
+            "confidence": 1.0,
+            "source": ["review_execution_policy"],
+            "needs_human_review": needs_review,
         }))
 
 
@@ -265,7 +262,9 @@ def _validated_returned_run(
         payload["failure_kind"] = "execution_nonzero"
     else:
         payload["failure_kind"] = ""
-    return SandboxRun.model_validate(boundary.clean(payload))
+    cleaned = boundary.clean(payload)
+    json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
+    return SandboxRun.model_validate(cleaned)
 
 
 class LocalSkillHarness:
@@ -617,6 +616,9 @@ class SandboxRunner:
         safe_review_input = self.boundary.clean(review_input)
         decisions: list[FilterIntercept] = []
         allowed_requests: list[ExecutionRequest] = []
+        warnings: list[ReviewWarning] = []
+        needs_human_review: list[ReviewWarning] = []
+        normalizer = ResultNormalizer(self.boundary)
         for request in requests:
             result = self.policy.evaluate(request, policy_context)
             safe_intercept = FilterIntercept.model_validate(
@@ -626,12 +628,45 @@ class SandboxRunner:
                 on_decision(safe_intercept)
             if result.decision == "allow":
                 allowed_requests.append(request)
+            else:
+                warning = _policy_warning(safe_intercept, boundary=self.boundary)
+                if result.decision == "needs_human_review":
+                    needs_human_review.append(warning)
+                else:
+                    warnings.append(warning)
         if not allowed_requests:
-            return SandboxResult([], decisions, [], [], [], effective_runtime)
+            return SandboxResult(
+                runs=[],
+                decisions=decisions,
+                candidates=normalizer.prepare(
+                    ReviewCandidates(
+                        warnings=warnings,
+                        needs_human_review=needs_human_review,
+                    )),
+                effective_runtime=effective_runtime,
+            )
 
-        warnings: list[ReviewWarning] = []
-        needs_human_review: list[ReviewWarning] = []
         runs: list[SandboxRun] = []
+        prepared_batches: list[PreparedCandidates] = []
+
+        def complete_run(run: SandboxRun) -> None:
+            artifacts = load_sandbox_artifacts([run], redactor=_BoundaryRedactor(self.boundary))
+            prepared = normalizer.prepare(artifacts.candidates)
+            invalid_run_ids = {*artifacts.invalid_run_ids, *prepared.invalid_run_ids}
+            if run.run_id in invalid_run_ids:
+                payload = run.model_dump(mode="json")
+                payload.update({
+                    "failure_kind": "artifact_invalid",
+                    "failure_reason": "sandbox output artifact failed schema validation",
+                })
+                run = SandboxRun.model_validate(self.boundary.clean(payload))
+            if (run.exit_code != 0 or run.timed_out) and not prepared.needs_human_review:
+                needs_human_review.append(_failure_warning(run, boundary=self.boundary))
+            runs.append(run)
+            prepared_batches.append(prepared)
+            if on_run is not None:
+                on_run(run)
+
         ordered_requests = sorted(allowed_requests, key=lambda item: item.request_id)
         try:
             harness = self._harness_for_runtime(runtime=effective_runtime)
@@ -650,9 +685,7 @@ class SandboxRunner:
                     dry_run=dry_run,
                     boundary=self.boundary,
                 )
-                runs.append(failed_run)
-                if on_run is not None:
-                    on_run(failed_run)
+                complete_run(failed_run)
         else:
             for request in ordered_requests:
                 try:
@@ -682,29 +715,17 @@ class SandboxRunner:
                         dry_run=dry_run,
                         boundary=self.boundary,
                     )
-                runs.append(safe_run)
-                if on_run is not None:
-                    on_run(safe_run)
+                complete_run(safe_run)
 
-        artifacts = load_sandbox_artifacts(runs, redactor=_BoundaryRedactor(self.boundary))
-        for run in runs:
-            if (run.exit_code != 0 or run.timed_out) and not _run_has_human_review_artifact(run):
-                needs_human_review.append(_failure_warning(run, boundary=self.boundary))
-        findings = [
-            Finding.model_validate(self.boundary.clean(item.model_dump(mode="json"))) for item in artifacts.findings
-        ]
-        warnings.extend(
-            ReviewWarning.model_validate(self.boundary.clean(item.model_dump(mode="json")))
-            for item in artifacts.warnings)
-        needs_human_review.extend(
-            ReviewWarning.model_validate(self.boundary.clean(item.model_dump(mode="json")))
-            for item in artifacts.needs_human_review)
+        prepared_batches.append(
+            normalizer.prepare(ReviewCandidates(
+                warnings=warnings,
+                needs_human_review=needs_human_review,
+            )))
         return SandboxResult(
             runs=runs,
             decisions=decisions,
-            findings=findings,
-            warnings=warnings,
-            needs_human_review=needs_human_review,
+            candidates=merge_prepared_candidates(*prepared_batches),
             effective_runtime=effective_runtime,
         )
 

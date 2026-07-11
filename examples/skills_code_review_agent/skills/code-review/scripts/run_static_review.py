@@ -183,17 +183,17 @@ def _is_pickle_loads_on_untrusted_data(lower: str) -> bool:
     return "pickle.loads(" in lower and _has_user_controlled_data(lower)
 
 
-def _placeholder_confidence(
+def _placeholder_signal(
     text: str,
     event_flags: dict[tuple[str, str], list[bool]],
-) -> float | None:
+) -> tuple[float, bool] | None:
     matches = list(_SECRET_PLACEHOLDER_RE.finditer(text))
     if not matches:
         return None
     all_likely_placeholders = all(
         len(flags) == 1 and flags[0] for match in matches
         for flags in [event_flags.get((match.group("type"), match.group("hash")), [])])
-    return 0.58 if all_likely_placeholders else 0.99
+    return (0.58, True) if all_likely_placeholders else (0.99, False)
 
 
 def _redaction_event_flags(payload: dict[str, Any]) -> dict[tuple[str, str], list[bool]]:
@@ -233,17 +233,16 @@ def _looks_like_low_confidence_secret_assignment(text: str) -> bool:
     return value is not None and _is_dummy_secret_value(value)
 
 
-def _secret_warning(line: dict[str, Any], *, confidence: float = 0.58) -> dict[str, Any]:
-    return {
-        "category": "secret",
-        "title": "placeholder secret-like value added to production code",
-        "message": "Secret-shaped test/example/changeme values should be confirmed as non-production credentials.",
-        "file": _line_file(line),
-        "line": _line_number(line),
-        "confidence": confidence,
-        "needs_human_review": False,
-        "source": ["run_static_review.py", "skill-rule:low_confidence_secret"],
-    }
+def _secret_candidate(line: dict[str, Any], *, confidence: float = 0.58) -> dict[str, Any]:
+    return _finding(
+        line,
+        severity="high",
+        category="secret",
+        title="placeholder secret-like value added to production code",
+        recommendation="Confirm the value is non-production test data or remove it from source.",
+        confidence=confidence,
+        rule_name="low_confidence_secret",
+    )
 
 
 def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -324,9 +323,10 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="pickle_loads",
                 ))
         is_secret_test_context = _is_test_file(file_path) or _is_fixture_file(file_path)
-        placeholder_confidence = _placeholder_confidence(text, redaction_event_flags)
-        if not is_secret_test_context and placeholder_confidence is not None:
-            if placeholder_confidence >= 0.80:
+        placeholder_signal = _placeholder_signal(text, redaction_event_flags)
+        if not is_secret_test_context and placeholder_signal is not None:
+            placeholder_confidence, likely_placeholder = placeholder_signal
+            if not likely_placeholder:
                 findings.append(
                     _finding(
                         line,
@@ -339,7 +339,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                         rule_name="hardcoded_secret",
                     ))
             else:
-                warnings.append(_secret_warning(line, confidence=placeholder_confidence))
+                findings.append(_secret_candidate(line, confidence=placeholder_confidence))
         elif not is_secret_test_context and _looks_like_raw_secret_assignment(text):
             findings.append(
                 _finding(
@@ -352,7 +352,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="hardcoded_secret",
                 ))
         elif not is_secret_test_context and _looks_like_low_confidence_secret_assignment(text):
-            warnings.append(_secret_warning(line))
+            findings.append(_secret_candidate(line))
         if (_is_database_lifecycle_candidate(text) and not lower.startswith(("with ", "async with "))
                 and not _has_lifecycle_signal(lines, line)):
             findings.append(
@@ -389,16 +389,27 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="aiohttp_session_lifecycle",
                 ))
 
-    if any(_is_business_python_file(path)
-           for path in changed_files) and not any(_is_test_file(path) for path in changed_files):
-        warnings.append({
-            "category": "test",
-            "title": "code changed without an accompanying test change",
-            "message": "Business code changed, but the diff does not include a test file.",
-            "confidence": 0.72,
-            "needs_human_review": False,
-            "source": ["run_static_review.py", "skill-rule:missing_tests"],
-        })
+    business_files = sorted(path for path in changed_files if _is_business_python_file(path))
+    if business_files and not any(_is_test_file(path) for path in changed_files):
+        first_file = business_files[0]
+        candidate_line = next(
+            (line for line in lines if _line_file(line) == first_file),
+            {
+                "file": first_file,
+                "line": 1,
+                "content": first_file,
+            },
+        )
+        findings.append(
+            _finding(
+                candidate_line,
+                severity="low",
+                category="test",
+                title="code changed without nearby test changes",
+                recommendation="Add or update focused tests for the changed behavior.",
+                confidence=0.66,
+                rule_name="missing_tests",
+            ))
 
     return findings, warnings
 

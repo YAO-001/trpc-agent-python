@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from .agent_factory import prepare_execution_plan
-from .dedupe import dedupe_findings
-from .dedupe import dedupe_warnings
 from .diff_parser import parse_unified_diff
 from .filter_policy import ReviewExecutionPolicy
 from .input_resolver import EXAMPLE_DIR
@@ -35,6 +33,9 @@ from .models import terminal_status
 from .models import utc_now
 from .report_builder import ReportBuilder
 from .redaction_boundary import RedactionBoundary
+from .result_normalizer import NormalizedReviewResult
+from .result_normalizer import ResultNormalizer
+from .result_normalizer import ReviewCandidates
 from .rule_engine import RuleEngine
 from .sandbox_runner import SandboxRunner
 from .storage import DEFAULT_DB_URL
@@ -370,33 +371,18 @@ class ReviewOrchestrator:
         boundary: RedactionBoundary,
         task: ReviewTask,
         parsed,
-        finding_candidates: list[Finding],
-        warning_candidates: list[ReviewWarning],
-        review_candidates: list[ReviewWarning],
+        normalized: NormalizedReviewResult,
         decisions: list[FilterIntercept],
         runs: list[SandboxRun],
-        debug_dropped_count: int,
         input_summary: dict[str, Any],
         redacted_input: dict[str, Any],
         dry_run: bool,
         json_name: str = "review_report.json",
         markdown_name: str = "review_report.md",
     ):
-        findings = dedupe_findings(
-            [Finding.model_validate(boundary.clean(item.model_dump(mode="json"))) for item in finding_candidates])
-        warnings = sorted(
-            dedupe_warnings([
-                ReviewWarning.model_validate(boundary.clean(item.model_dump(mode="json")))
-                for item in warning_candidates
-            ]),
-            key=_warning_sort_key,
-        )
-        needs_human_review = sorted(
-            dedupe_warnings([
-                ReviewWarning.model_validate(boundary.clean(item.model_dump(mode="json"))) for item in review_candidates
-            ]),
-            key=_warning_sort_key,
-        )
+        findings = list(normalized.findings)
+        warnings = sorted(normalized.warnings, key=_warning_sort_key)
+        needs_human_review = sorted(normalized.needs_human_review, key=_warning_sort_key)
         status = ReviewTaskStatus(task.status)
         telemetry = build_telemetry(
             task_id=task.task_id,
@@ -408,7 +394,7 @@ class ReviewOrchestrator:
             filter_intercepts=decisions,
             sandbox_runs=runs,
             redaction_summary=boundary.summary,
-            debug_dropped_count=debug_dropped_count,
+            debug_dropped_count=normalized.dropped_count,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             dry_run=dry_run,
         )
@@ -541,33 +527,19 @@ class ReviewOrchestrator:
             task_id=task_id,
             dry_run=dry_run,
         )
-        rule_result = RuleEngine().run(parsed, boundary.summary)
-        rule_result.findings = [
-            item.__class__.model_validate(boundary.clean(item.model_dump(mode="json"))) for item in rule_result.findings
-        ]
-        rule_result.warnings = [
-            item.__class__.model_validate(boundary.clean(item.model_dump(mode="json"))) for item in rule_result.warnings
-        ]
-        rule_result.needs_human_review = [
-            item.__class__.model_validate(boundary.clean(item.model_dump(mode="json")))
-            for item in rule_result.needs_human_review
-        ]
+        normalizer = ResultNormalizer(boundary)
+        rule_candidates = RuleEngine().run(parsed, boundary.summary)
+        prepared_rules = normalizer.prepare(rule_candidates)
         review_input = boundary.clean({
-            "task_id":
-            task_id,
-            "input_type":
-            resolved_metadata["input_type"],
-            "input_ref":
-            resolved_metadata["input_ref"],
-            "fixture_names":
-            resolved_metadata["fixture_names"],
-            "file_list":
-            resolved_metadata["file_list"],
-            "changed_files":
-            parsed.changed_files,
+            "task_id": task_id,
+            "input_type": resolved_metadata["input_type"],
+            "input_ref": resolved_metadata["input_ref"],
+            "fixture_names": resolved_metadata["fixture_names"],
+            "file_list": resolved_metadata["file_list"],
+            "changed_files": parsed.changed_files,
             "added_lines": [line.model_dump(mode="json") for line in parsed.added_lines],
-            "rule_warnings": [item.model_dump(mode="json") for item in rule_result.warnings],
-            "rule_needs_human_review": [item.model_dump(mode="json") for item in rule_result.needs_human_review],
+            "rule_warnings": [],
+            "rule_needs_human_review": [],
         })
         review_input["redaction_summary"] = boundary.summary.model_dump(mode="json")
         task = ReviewTask.model_validate(
@@ -638,6 +610,7 @@ class ReviewOrchestrator:
             ),
             boundary=boundary,
         )
+        normalized = normalizer.finalize(prepared_rules, sandbox_result.candidates)
 
         task = self._orchestration_call(
             storage=storage,
@@ -663,12 +636,9 @@ class ReviewOrchestrator:
                 boundary=boundary,
                 task=task,
                 parsed=parsed,
-                finding_candidates=[*rule_result.findings, *sandbox_result.findings],
-                warning_candidates=[*rule_result.warnings, *sandbox_result.warnings],
-                review_candidates=[*rule_result.needs_human_review, *sandbox_result.needs_human_review],
+                normalized=normalized,
                 decisions=sandbox_result.decisions,
                 runs=sandbox_result.runs,
-                debug_dropped_count=rule_result.debug_dropped_count,
                 input_summary={
                     "input_type": review_input["input_type"],
                     "input_ref": review_input["input_ref"],
@@ -844,6 +814,11 @@ class ReviewOrchestrator:
             ),
             boundary=boundary,
         )
+        normalizer = ResultNormalizer(boundary)
+        normalized = normalizer.finalize(
+            normalizer.prepare(ReviewCandidates()),
+            sandbox_result.candidates,
+        )
         task = self._orchestration_call(
             storage=storage,
             task=task,
@@ -867,12 +842,9 @@ class ReviewOrchestrator:
                 boundary=boundary,
                 task=task,
                 parsed=parsed,
-                finding_candidates=[],
-                warning_candidates=sandbox_result.warnings,
-                review_candidates=sandbox_result.needs_human_review,
+                normalized=normalized,
                 decisions=sandbox_result.decisions,
                 runs=sandbox_result.runs,
-                debug_dropped_count=0,
                 input_summary={
                     "input_type": "demo_filter",
                     "input_ref": "filter:rm-rf-root",

@@ -24,6 +24,8 @@ from agent.input_resolver import EXAMPLE_DIR
 from agent.models import Finding
 from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
+from agent.redaction_boundary import RedactionBoundary
+from agent.result_normalizer import ResultNormalizer
 from agent.sandbox_artifact_loader import load_sandbox_artifacts
 from agent.sandbox_runner import SandboxRunner
 from agent.secret_redactor import SecretRedactor
@@ -38,6 +40,55 @@ RAW_SAMPLE_SECRETS = [
     "correct-horse-battery-staple",
     "FAKEKEYDATA",
 ]
+
+
+def _sandbox_finding(
+    *,
+    line: int,
+    confidence: float,
+    severity: str = "low",
+    category: str = "sandbox",
+    source: object = "mock",
+) -> dict:
+    return {
+        "severity": severity,
+        "category": category,
+        "file": "src/sandbox_candidate.py",
+        "line": line,
+        "title": f"sandbox candidate {line}",
+        "evidence": f"sandbox evidence {line}",
+        "recommendation": "Review the sandbox candidate.",
+        "confidence": confidence,
+        "source": source,
+    }
+
+
+def _harness_with_raw_artifact(content: str):
+
+    class ArtifactHarness:
+
+        def __init__(self, *, runtime, policy, boundary=None, redactor=None):
+            del policy, boundary, redactor
+            self.runtime = runtime
+
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
+            del review_input, policy_context, dry_run
+            return SandboxRun(
+                run_id=f"sandbox_{request.request_id.replace(':', '_')}",
+                task_id=task_id,
+                request_id=request.request_id,
+                runtime=self.runtime,
+                command=list(request.command_argv),
+                decision="allow",
+                output_files={request.output_spec.globs[0]: content},
+                created_at="1970-01-01T00:00:00+00:00",
+            )
+
+    return ArtifactHarness
+
+
+def _harness_with_artifact(payload: dict):
+    return _harness_with_raw_artifact(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def test_acceptance_matrix_has_test_references():
@@ -143,6 +194,12 @@ def test_filter_nonallow_request_returns_before_harness_lookup(monkeypatch, comm
     assert len(result.decisions) == 1
     assert decision_callbacks == result.decisions
     assert result.decisions[0].metadata["error_kind"] == error_kind
+    if error_kind == "policy_denied":
+        assert result.candidates.warnings
+        assert result.candidates.needs_human_review == ()
+    else:
+        assert result.candidates.warnings == ()
+        assert result.candidates.needs_human_review
 
 
 def test_code_review_repository_has_no_dynamic_run_env():
@@ -478,8 +535,8 @@ def test_skill_run_sdk_blocked_response_never_becomes_allow_run(monkeypatch):
     assert result.runs[0].request_id == plan.requests[0].request_id
     assert result.runs[0].decision == "allow"
     assert result.runs[0].failure_kind == "orchestration_error"
-    assert result.needs_human_review
-    assert "integrity" in result.needs_human_review[0].message.lower()
+    assert result.candidates.needs_human_review
+    assert "integrity" in result.candidates.needs_human_review[0].message.lower()
 
 
 def test_skill_run_non_mapping_sdk_output_fails_closed(monkeypatch):
@@ -514,7 +571,7 @@ def test_skill_run_non_mapping_sdk_output_fails_closed(monkeypatch):
     assert len(result.runs) == 1
     assert result.runs[0].request_id == plan.requests[0].request_id
     assert result.runs[0].failure_kind == "orchestration_error"
-    assert result.needs_human_review
+    assert result.candidates.needs_human_review
 
 
 def test_skill_run_handler_receives_callback_canonicalized_plain_dict(monkeypatch):
@@ -641,7 +698,10 @@ def test_skill_static_review_emits_database_or_async_resource_finding(tmp_path):
     skill_findings = [finding for finding in report.findings if "skill:run_static_review" in finding.source]
 
     assert skill_findings
-    assert any(finding.category in {"database", "async_resource"} for finding in skill_findings)
+    assert any(finding.category == "async_resource" for finding in skill_findings)
+    audit_warnings = [*report.warnings, *report.needs_human_review]
+    assert not any("invalid schema" in warning.title and "skill:run_static_review" in warning.source
+                   for warning in audit_warnings)
 
 
 def test_static_review_file_handle_uses_canonical_category(tmp_path):
@@ -797,11 +857,15 @@ def test_sandbox_artifact_invalid_schema_becomes_human_review_warning():
     ]
 
     artifacts = load_sandbox_artifacts(runs, redactor=SecretRedactor())
+    prepared = ResultNormalizer(RedactionBoundary()).prepare(artifacts.candidates)
+    normalized = ResultNormalizer(RedactionBoundary()).finalize(prepared)
 
-    assert artifacts.findings == []
-    assert len(artifacts.needs_human_review) >= 3
-    assert all("AKIAIOSFODNN7EXAMPLE" not in warning.message for warning in artifacts.needs_human_review)
-    assert any("sandbox:run_static_review" in warning.source for warning in artifacts.needs_human_review)
+    assert prepared.findings == ()
+    assert artifacts.invalid_run_ids == {"sandbox_bad_json", "sandbox_bad_finding"}
+    assert len(normalized.needs_human_review) >= 3
+    assert all("AKIAIOSFODNN7EXAMPLE" not in warning.message for warning in normalized.needs_human_review)
+    assert any("sandbox:run_static_review" in warning.source for warning in normalized.needs_human_review)
+    assert any(warning.title == "sandbox artifact is not valid JSON" for warning in normalized.needs_human_review)
 
 
 def test_legacy_resource_artifact_is_canonicalized_without_crashing():
@@ -834,9 +898,30 @@ def test_legacy_resource_artifact_is_canonicalized_without_crashing():
     )
 
     artifacts = load_sandbox_artifacts([run])
+    prepared = ResultNormalizer(RedactionBoundary()).prepare(artifacts.candidates)
 
-    assert [item.category for item in artifacts.findings] == ["async_resource"]
-    assert [item.category for item in artifacts.warnings] == ["async_resource"]
+    assert [item.category for item in prepared.findings] == ["async_resource"]
+    assert [item.category for item in prepared.warnings] == ["async_resource"]
+
+
+def test_loader_returns_redacted_raw_candidate_mappings_when_redactor_is_supplied():
+    raw = "loader-secret-value-987654"
+    finding = _sandbox_finding(line=4, confidence=0.9)
+    finding["evidence"] = f'client_secret="{raw}"'
+    run = SandboxRun(
+        run_id="sandbox_loader_redaction",
+        task_id="task-artifact",
+        request_id="task-artifact:loader-redaction",
+        runtime="local",
+        command=["python3", "scripts/run_static_review.py"],
+        output_files={"out/findings.json": json.dumps({"findings": [finding]})},
+    )
+
+    artifacts = load_sandbox_artifacts([run], redactor=SecretRedactor())
+    candidate = artifacts.candidates.findings[0].value
+
+    assert raw not in json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+    assert "[REDACTED:SECRET:" in candidate["evidence"]
 
 
 def test_malformed_sandbox_warning_becomes_audit_warning_without_crashing():
@@ -860,11 +945,42 @@ def test_malformed_sandbox_warning_becomes_audit_warning_without_crashing():
     )
 
     artifacts = load_sandbox_artifacts([run])
+    prepared = ResultNormalizer(RedactionBoundary()).prepare(artifacts.candidates)
+    normalized = ResultNormalizer(RedactionBoundary()).finalize(prepared)
 
-    assert artifacts.warnings == []
-    assert len(artifacts.needs_human_review) == 1
-    assert artifacts.needs_human_review[0].category == "sandbox"
-    assert artifacts.needs_human_review[0].title == "sandbox warning has invalid schema"
+    assert prepared.warnings == ()
+    assert prepared.invalid_run_ids == {"sandbox_bad_warning"}
+    assert len(normalized.needs_human_review) == 1
+    assert normalized.needs_human_review[0].category == "sandbox"
+    assert normalized.needs_human_review[0].title == "review warning has invalid schema"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps({"findings": {}}),
+        json.dumps({"findings": [17]}),
+        json.dumps({"warnings": "not-an-array"}),
+        json.dumps({"findings": [_sandbox_finding(line=1, confidence=float("nan"))]}),
+        "[" * 1100 + "0" + "]" * 1100,
+        '{"findings":[' + "[" * 500 + "0" + "]" * 500 + "]}",
+    ],
+)
+def test_invalid_artifact_shapes_are_never_silently_dropped(content):
+    run = SandboxRun(
+        run_id="sandbox_invalid_shape",
+        task_id="task-artifact",
+        request_id="task-artifact:invalid-shape",
+        runtime="local",
+        command=["python3", "scripts/run_static_review.py"],
+        output_files={"out/findings.json": content},
+    )
+
+    artifacts = load_sandbox_artifacts([run])
+    prepared = ResultNormalizer(RedactionBoundary()).prepare(artifacts.candidates)
+
+    assert "sandbox_invalid_shape" in {*artifacts.invalid_run_ids, *prepared.invalid_run_ids}
+    assert prepared.validation_errors
 
 
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):
@@ -1039,6 +1155,294 @@ def test_container_runtime_uses_trpc_skill_tool_set_harness(tmp_path, monkeypatc
     assert calls["requests"]
     assert any(finding.title == "container skill finding" and "skill:run_static_review" in finding.source
                for finding in report.findings)
+
+
+def test_sandbox_findings_use_the_same_confidence_boundary(tmp_path, monkeypatch):
+    payload = {
+        "findings": [
+            _sandbox_finding(line=1, confidence=0),
+            _sandbox_finding(line=2, confidence=0.79, severity="high"),
+            _sandbox_finding(line=3, confidence=0.80),
+        ],
+        "warnings": [],
+        "needs_human_review": [],
+    }
+    monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", _harness_with_artifact(payload))
+
+    report = ReviewOrchestrator(
+        db_url=f"sqlite:///{tmp_path / 'review.db'}",
+        output_dir=tmp_path / "out",
+    ).review(fixture="clean", runtime="container", dry_run=True)
+
+    sandbox_findings = [item for item in report.findings if "sandbox" in " ".join(item.source)]
+    assert [item.line for item in sandbox_findings] == [3]
+    assert any(item.line == 2 for item in report.needs_human_review)
+    assert report.telemetry.debug_dropped_count >= 1
+
+
+def test_low_confidence_secret_is_one_global_human_review_item(tmp_path):
+    raw = "dummy-secret-for-tests"
+    diff_path = tmp_path / "dummy-secret.diff"
+    diff_path.write_text(
+        """diff --git a/app/config.py b/app/config.py
+index 1111111..2222222 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -0,0 +1 @@
++api_key = "dummy-secret-for-tests"
+""",
+        encoding="utf-8",
+    )
+
+    report = ReviewOrchestrator(
+        db_url=f"sqlite:///{tmp_path / 'review.db'}",
+        output_dir=tmp_path / "out",
+    ).review(diff_file=str(diff_path), runtime="local", dry_run=True)
+    secret_reviews = [item for item in report.needs_human_review if item.category == "secret"]
+
+    assert len(secret_reviews) == 1
+    assert secret_reviews[0].confidence == 0.58
+    assert "rule:secret" in secret_reviews[0].source
+    assert "skill:run_static_review" in secret_reviews[0].source
+    assert raw not in json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+
+
+def test_invalid_artifact_marks_run_and_terminal_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        sandbox_module,
+        "TrpcSkillToolSetHarness",
+        _harness_with_raw_artifact("{not-json"),
+    )
+    db_url = f"sqlite:///{tmp_path / 'review.db'}"
+
+    report = ReviewOrchestrator(
+        db_url=db_url,
+        output_dir=tmp_path / "out-invalid",
+    ).review(fixture="clean", runtime="container", dry_run=True)
+    rows = ReviewStorage(db_url).query_task(report.task_id)
+
+    assert report.task_status == "completed_with_errors"
+    assert any(item["failure_kind"] == "artifact_invalid" for item in rows["sandbox_runs"])
+    assert report.telemetry.sandbox_failures_count >= 1
+
+
+def test_field_invalid_artifact_is_marked_before_run_callback(monkeypatch):
+    rejected = "opaque-artifact-token-987654"
+    payload = {
+        "findings": [{
+            **_sandbox_finding(line=1, confidence=0.9),
+            "line": rejected,
+        }],
+        "warnings": [],
+        "needs_human_review": [],
+    }
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_harness_for_runtime",
+        lambda *, runtime: _harness_with_artifact(payload)(
+            runtime=runtime,
+            policy=runner.policy,
+        ),
+        raising=False,
+    )
+    saved = []
+    review_input = {"task_id": "task-invalid-artifact", "fixture_names": []}
+
+    with prepare_execution_plan(
+            task_id="task-invalid-artifact",
+            runtime="local",
+            review_input=review_input,
+            redactor=SecretRedactor(),
+    ) as plan:
+        result = runner.run(
+            task_id="task-invalid-artifact",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+            on_run=saved.append,
+        )
+
+    assert saved == result.runs
+    assert len(saved) == 1
+    assert saved[0].failure_kind == "artifact_invalid"
+    assert len(result.candidates.validation_errors) == 1
+    assert rejected not in result.candidates.validation_errors[0].message
+
+
+@pytest.mark.parametrize(
+    "deep_json",
+    [
+        "[" * 1100 + "0" + "]" * 1100,
+        '{"findings":[' + "[" * 500 + "0" + "]" * 500 + "]}",
+    ],
+)
+def test_deep_json_artifact_still_invokes_run_callback_once(monkeypatch, deep_json):
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_harness_for_runtime",
+        lambda *, runtime: _harness_with_raw_artifact(deep_json)(runtime=runtime, policy=runner.policy),
+        raising=False,
+    )
+    saved = []
+    review_input = {"task_id": "task-deep-artifact", "fixture_names": []}
+
+    with prepare_execution_plan(
+            task_id="task-deep-artifact",
+            runtime="local",
+            review_input=review_input,
+            redactor=SecretRedactor(),
+    ) as plan:
+        result = runner.run(
+            task_id="task-deep-artifact",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+            on_run=saved.append,
+        )
+
+    assert saved == result.runs
+    assert len(saved) == 1
+    assert saved[0].failure_kind == "artifact_invalid"
+    assert result.candidates.validation_errors
+
+
+def test_escaped_unicode_surrogate_is_artifact_invalid_before_callback(monkeypatch):
+    payload = {
+        "findings": [{
+            **_sandbox_finding(line=1, confidence=0.9),
+            "evidence": 'client_secret="\ud800-surrogate"',
+        }],
+        "warnings": [],
+        "needs_human_review": [],
+    }
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_harness_for_runtime",
+        lambda *, runtime: _harness_with_raw_artifact(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        (runtime=runtime, policy=runner.policy),
+        raising=False,
+    )
+    saved = []
+    review_input = {"task_id": "task-surrogate-artifact", "fixture_names": []}
+
+    with prepare_execution_plan(
+            task_id="task-surrogate-artifact",
+            runtime="local",
+            review_input=review_input,
+            redactor=SecretRedactor(),
+    ) as plan:
+        result = runner.run(
+            task_id="task-surrogate-artifact",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+            on_run=saved.append,
+        )
+
+    assert saved == result.runs
+    assert len(saved) == 1
+    assert saved[0].failure_kind == "artifact_invalid"
+    assert result.candidates.validation_errors
+
+
+def test_valid_candidates_survive_an_invalid_item_from_the_same_run(monkeypatch):
+    payload = {
+        "findings": [
+            _sandbox_finding(line=7, confidence=0.9),
+            {
+                **_sandbox_finding(line=8, confidence=0.9),
+                "source": 42,
+            },
+        ],
+        "warnings": [],
+        "needs_human_review": [],
+    }
+    runner = SandboxRunner(
+        example_dir=EXAMPLE_DIR,
+        policy=ReviewExecutionPolicy(dry_run=True),
+        redactor=SecretRedactor(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_harness_for_runtime",
+        lambda *, runtime: _harness_with_artifact(payload)(runtime=runtime, policy=runner.policy),
+        raising=False,
+    )
+    review_input = {"task_id": "task-partial-artifact", "fixture_names": []}
+
+    with prepare_execution_plan(
+            task_id="task-partial-artifact",
+            runtime="local",
+            review_input=review_input,
+            redactor=SecretRedactor(),
+    ) as plan:
+        result = runner.run(
+            task_id="task-partial-artifact",
+            review_input=review_input,
+            runtime="local",
+            dry_run=True,
+            requests=[plan.requests[0]],
+            policy_context=plan.policy_context,
+        )
+
+    assert result.runs[0].failure_kind == "artifact_invalid"
+    assert [item.line for item in result.candidates.findings] == [7]
+    assert len(result.candidates.validation_errors) == 1
+
+
+def test_host_and_sandbox_duplicate_is_finalized_once_with_all_provenance(tmp_path, monkeypatch):
+    payload = {
+        "findings": [{
+            "severity": "critical",
+            "category": "security",
+            "file": "app/handlers.py",
+            "line": 7,
+            "title": "sandbox duplicate security finding",
+            "evidence": "sandbox duplicate evidence",
+            "recommendation": "Use a safe subprocess invocation.",
+            "confidence": 0.99,
+            "source": ["sandbox-producer"],
+        }],
+        "warnings": [],
+        "needs_human_review": [],
+    }
+    monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", _harness_with_artifact(payload))
+
+    report = ReviewOrchestrator(
+        db_url=f"sqlite:///{tmp_path / 'review.db'}",
+        output_dir=tmp_path / "out",
+    ).review(fixture="security", runtime="container", dry_run=True)
+    merged = [
+        item for item in report.findings if (item.file, item.line, item.category) == ("app/handlers.py", 7, "security")
+    ]
+
+    assert len(merged) == 1
+    assert merged[0].severity == "critical"
+    assert merged[0].confidence == 0.99
+    assert "sandbox-producer" in merged[0].source
+    assert any(source.startswith("rule:") for source in merged[0].source)
+    assert len([source for source in merged[0].source if source.startswith("sandbox_run:")]) == 3
 
 
 def test_sandbox_artifact_findings_are_merged_with_rule_findings(tmp_path, monkeypatch):
@@ -1220,6 +1624,7 @@ def test_demo_filter_writes_public_deny_report_without_sandbox_run(tmp_path):
     assert report.sandbox_runs == []
     assert report.filter_intercepts
     assert report.filter_intercepts[0].decision == "deny"
+    assert any(warning.title == "sandbox request denied by policy" for warning in report.warnings)
     rows = ReviewStorage(db_url).query_task(report.task_id)
     metrics = json.loads(rows["telemetry_summaries"][0]["metrics_json"])
     summary = json.loads(rows["reports"][0]["summary_json"])

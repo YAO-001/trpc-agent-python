@@ -1421,6 +1421,37 @@ def test_orchestrator_persists_decisions_and_prior_runs_incrementally(tmp_path, 
     assert report.task_status == ReviewTaskStatus.COMPLETED
 
 
+def test_artifact_invalid_run_is_persisted_before_the_next_execution(tmp_path, monkeypatch):
+    observed = []
+
+    class InspectingHarness:
+
+        def execute_one(self, **kwargs):
+            request = kwargs["request"]
+            rows = ReviewStorage(_db_url(tmp_path)).query_task(request.task_id)
+            if observed:
+                assert len(rows["sandbox_runs"]) == len(observed)
+                assert rows["sandbox_runs"][0]["failure_kind"] == "artifact_invalid"
+            content = "{not-json" if not observed else "{}"
+            observed.append(request.request_id)
+            return _successful_run(request).model_copy(update={"output_files": {request.output_spec.globs[0]: content}})
+
+    monkeypatch.setattr(
+        SandboxRunner,
+        "_harness_for_runtime",
+        lambda self, runtime: InspectingHarness(),
+    )
+
+    report = _orchestrator(tmp_path).review(fixture="clean", dry_run=True, runtime="container")
+    rows = ReviewStorage(_db_url(tmp_path)).query_task(report.task_id)
+
+    assert len(observed) == 3
+    assert len(rows["sandbox_runs"]) == 3
+    assert rows["sandbox_runs"][0]["failure_kind"] == "artifact_invalid"
+    assert all(item["failure_kind"] == "" for item in rows["sandbox_runs"][1:])
+    assert report.task_status == ReviewTaskStatus.COMPLETED_WITH_ERRORS
+
+
 @pytest.mark.parametrize("method_name", ["save_filter_decision", "save_sandbox_run"])
 def test_orchestrator_callback_storage_error_escapes_without_reclassification(tmp_path, monkeypatch, method_name):
 
@@ -1570,6 +1601,35 @@ def test_returned_run_identity_mismatch_becomes_orchestration_error(tmp_path, ch
     assert result.runs[0].runtime == request.runtime
     assert result.runs[0].decision == "allow"
     assert result.runs[0].failure_kind == "orchestration_error"
+
+
+def test_returned_run_with_non_utf8_identity_fails_before_callback(tmp_path):
+    request = _three_valid_requests(
+        tmp_path,
+        task_id="task-returned-surrogate",
+        runtime="container",
+    )[0]
+
+    class SurrogateHarness:
+
+        def execute_one(self, **kwargs):
+            return _successful_run(kwargs["request"]).model_copy(update={"run_id": "\ud800"})
+
+    saved = []
+    result = _runner(harness=SurrogateHarness()).run(
+        task_id=request.task_id,
+        review_input={"task_id": request.task_id},
+        runtime="container",
+        dry_run=True,
+        requests=[request],
+        policy_context=_context(request),
+        on_run=saved.append,
+    )
+
+    assert saved == result.runs
+    assert len(result.runs) == 1
+    assert result.runs[0].failure_kind == "orchestration_error"
+    result.runs[0].model_dump_json().encode("utf-8")
 
 
 def test_successful_returned_run_discards_stale_failure_fields(tmp_path):

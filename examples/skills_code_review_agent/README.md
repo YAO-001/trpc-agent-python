@@ -7,8 +7,8 @@ telemetry, and dry-run fixtures.
 ## Architecture
 
 - Deterministic review core: resolves diffs, redacts secrets, parses unified
-  diffs, runs rules, deduplicates findings, stores SQL records, and writes JSON
-  and Markdown reports.
+  diffs, runs rules, validates all host and sandbox candidates at one schema
+  boundary, stores SQL records, and writes JSON and Markdown reports.
 - tRPC-Agent integration layer: provides a `code-review` Skill with docs and
   stdlib-only scripts. The main execution path uses `SkillToolSet` and
   `skill_run` with `output_files`, then merges sandbox artifacts back into the
@@ -42,6 +42,31 @@ python examples/skills_code_review_agent/run_review.py query --db-url sqlite:///
 
 Running `run_review.py` without a subcommand defaults to
 `review --fixture all --dry-run --runtime local`.
+
+## Input Modes
+
+`--diff-file` accepts standard unified diffs, with or without `diff --git`
+headers, including quoted paths and multi-file patches:
+
+```bash
+python examples/skills_code_review_agent/run_review.py review --diff-file change.diff --dry-run --runtime local
+```
+
+`--repo-path` reviews the final working-tree state across staged, unstaged, and
+untracked text files. `--file-list` is only valid with `--repo-path`; every
+selected path must be a non-empty repository-relative path that remains inside
+that repository:
+
+```bash
+python examples/skills_code_review_agent/run_review.py review --repo-path . --file-list src/app.py,tests/test_app.py --dry-run --runtime local
+```
+
+All host rules and sandbox analysis scripts emit raw finding candidates. One
+global normalizer validates them, deduplicates by exactly
+`(file, line, category)`, merges provenance, drops confidence below `0.50`,
+routes `0.50 <= confidence < 0.80` to warnings or human review according to
+severity, and keeps confidence `>= 0.80` as findings. Runtime, policy, and
+artifact audit warnings remain warnings and are not confidence-routed.
 
 ## Validation Commands
 
@@ -91,6 +116,8 @@ and telemetry record.
 | Filter-before-execution | `ReviewExecutionPolicy` gates every sandbox command before local/container harness execution | `test_filter_deny_before_sandbox_execution`; `test_filter_deny_before_container_execution_is_persisted` |
 | Timeout/output cap | sandbox stdout/stderr/output files are capped and record truncation plus output byte/file counts | `test_local_sandbox_truncates_large_output_and_scrubs_env` |
 | Secret redaction | diffs, sandbox streams, output artifacts, reports, and DB records are redacted before persistence | `test_e2e_all_8_fixtures_and_secret_redaction`; `test_report_outputs_do_not_include_user_home_path` |
+| Unified input modes | standard unified diffs plus staged, unstaged, untracked, and repository-relative file-list selections | `test_parse_standard_unified_diff_without_git_header`; `test_repo_input_contains_staged_unstaged_and_untracked`; `test_file_list_requires_repo_path_before_default_fixture` |
+| Global result normalization | host and sandbox candidates share the 0.50/0.80 thresholds and exact `(file, line, category)` identity | `test_sandbox_findings_use_the_same_confidence_boundary`; `test_host_and_sandbox_duplicate_is_finalized_once_with_all_provenance` |
 | Fake model/dry-run | no model API is required; dry-run uses deterministic timestamps and fixture task ids | `test_eval_fixtures_writes_summary`; `python examples/skills_code_review_agent/run_review.py review --fixture all --dry-run --runtime local` |
 | Report fields | JSON/Markdown include schema version, findings summary, severity stats, human review, filter summary, metrics, sandbox summary, redaction summary, recommendations, and query command | `test_review_report_contains_required_sections` |
 | Hidden-like precision | static Skill script catches high-risk patterns while suppressing high findings on safe patterns | `test_hidden_like_precision_recall`; `test_hidden_like_safe_cases_do_not_emit_high_or_critical_findings` |
@@ -124,5 +151,6 @@ and telemetry record.
 - Use `demo-filter` to verify deny decisions are visible in JSON/Markdown output.
 - Raw secret values must not appear in reports or storage; placeholders such as
   `[REDACTED:SECRET:...]` are expected.
-- If `git diff` returns no content for `--repo-path`, confirm the repo has
-  working tree changes.
+- If repository mode returns no content, confirm the repository has staged,
+  unstaged, or untracked text changes and that any `--file-list` paths select
+  them.

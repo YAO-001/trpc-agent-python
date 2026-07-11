@@ -3,18 +3,20 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # tRPC-Agent-Python is licensed under Apache-2.0.
-"""Load findings and review warnings from collected Skill sandbox artifacts."""
+"""Decode raw review candidates from collected Skill sandbox artifacts."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any
 
-from .models import Finding
 from .models import ReviewWarning
 from .models import SandboxRun
+from .result_normalizer import CandidateOrigin
+from .result_normalizer import OriginCandidate
+from .result_normalizer import ReviewCandidates
+from .result_normalizer import contains_unicode_surrogate
 from .secret_redactor import SecretRedactor
 
 _ARTIFACT_SKILL_SOURCES = {
@@ -22,29 +24,21 @@ _ARTIFACT_SKILL_SOURCES = {
     "out/secrets.json": ("skill:secret_scan", "sandbox:secret_scan"),
     "out/smoke.json": ("skill:smoke_test", "sandbox:smoke_test"),
 }
-_VALID_SEVERITIES = {"info", "low", "medium", "high", "critical"}
-_VALID_CATEGORIES = {"security", "secret", "async_resource", "database", "test", "sandbox"}
-_REQUIRED_FINDING_FIELDS = {
-    "severity",
-    "category",
-    "file",
-    "line",
-    "title",
-    "evidence",
-    "recommendation",
-    "confidence",
-}
+_CANDIDATE_BUCKETS = ("findings", "warnings", "needs_human_review")
 
 
 @dataclass(frozen=True)
 class SandboxArtifacts:
-    findings: list[Finding]
-    warnings: list[ReviewWarning]
-    needs_human_review: list[ReviewWarning]
+    candidates: ReviewCandidates
+    invalid_run_ids: frozenset[str] = frozenset()
+
+
+def _normalized_path(path: str) -> str:
+    return PurePosixPath(path.replace("\\", "/")).as_posix()
 
 
 def _sources_for_path(path: str) -> tuple[str, ...]:
-    normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
+    normalized = _normalized_path(path)
     if normalized in _ARTIFACT_SKILL_SOURCES:
         return _ARTIFACT_SKILL_SOURCES[normalized]
     for suffix, sources in _ARTIFACT_SKILL_SOURCES.items():
@@ -54,150 +48,73 @@ def _sources_for_path(path: str) -> tuple[str, ...]:
     return f"skill:{stem}", f"sandbox:{stem}"
 
 
-def _coerce_sources(value: Any, required_sources: tuple[str, ...]) -> list[str]:
-    if value is None:
-        sources: list[str] = []
-    elif isinstance(value, str):
-        sources = [value]
-    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
-        sources = list(value)
-    else:
-        raise ValueError("sandbox artifact source must be a string or list of strings")
-    sources.extend(required_sources)
-    return sorted(set(sources))
+def _origin(run: SandboxRun, path: str) -> CandidateOrigin:
+    normalized = _normalized_path(path)
+    sources = {
+        *_sources_for_path(normalized),
+        f"sandbox_run:{run.run_id}",
+        f"sandbox_artifact:{normalized}",
+    }
+    return CandidateOrigin(
+        run_id=run.run_id,
+        path=normalized,
+        trusted_sources=tuple(sorted(sources)),
+        allow_legacy_resource=True,
+    )
 
 
-def _redact(value: Any, redactor: SecretRedactor | None) -> str:
-    text = str(value or "")
+def _redact(value: object, redactor: SecretRedactor | None) -> str:
+    text = "" if value is None else str(value)
     if redactor is None:
         return text
     return redactor.redact_text(text).text
 
 
-def _coerce_line(value: Any) -> int | None:
-    try:
-        line = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if line < 0:
-        return None
-    return line
+def _clean_raw(value: object, redactor: SecretRedactor | None) -> object:
+    if isinstance(value, str):
+        return _redact(value, redactor)
+    if not isinstance(value, (dict, list)) or redactor is None:
+        return value
 
-
-def _coerce_confidence(value: Any, default: float = 1.0) -> float:
-    try:
-        confidence = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    if confidence < 0.0 or confidence > 1.0:
-        return default
-    return confidence
-
-
-def _canonical_category(value: Any, default: str = "sandbox") -> str:
-    category = str(value or default).lower()
-    return "async_resource" if category == "resource" else category
+    root: object = {} if isinstance(value, dict) else [None] * len(value)
+    pending: list[tuple[dict | list, dict | list]] = [(value, root)]
+    while pending:
+        source, target = pending.pop()
+        items = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, item in items:
+            if isinstance(item, dict):
+                cleaned: object = {}
+                pending.append((item, cleaned))
+            elif isinstance(item, list):
+                cleaned = [None] * len(item)
+                pending.append((item, cleaned))
+            elif isinstance(item, str):
+                cleaned = _redact(item, redactor)
+            else:
+                cleaned = item
+            target[key] = cleaned
+    return root
 
 
 def _artifact_warning(
     *,
     title: str,
     message: str,
-    sources: tuple[str, ...],
+    origin: CandidateOrigin,
     redactor: SecretRedactor | None,
-    needs_human_review: bool = True,
 ) -> ReviewWarning:
     return ReviewWarning(
         category="sandbox",
         title=title,
         message=_redact(message, redactor),
         confidence=1.0,
-        source=sorted({*sources, "sandbox_artifact_loader"}),
-        needs_human_review=needs_human_review,
+        source=sorted({*origin.trusted_sources, "sandbox_artifact_loader"}),
+        needs_human_review=True,
     )
 
 
-def _invalid_payload_warning(
-    *,
-    kind: str,
-    path: str,
-    sources: tuple[str, ...],
-    redactor: SecretRedactor | None,
-) -> ReviewWarning:
-    return _artifact_warning(
-        title=f"sandbox {kind} has invalid schema",
-        message=f"{path}: sandbox {kind} could not be validated.",
-        sources=sources,
-        redactor=redactor,
-    )
-
-
-def _warning_from_payload(
-    payload: dict[str, Any],
-    *,
-    sources: tuple[str, ...],
-    needs_human_review: bool,
-    redactor: SecretRedactor | None,
-) -> ReviewWarning:
-    line = _coerce_line(payload.get("line")) or 0
-    return ReviewWarning(
-        category=_canonical_category(payload.get("category")),
-        title=_redact(payload.get("title") or "sandbox artifact warning", redactor),
-        message=_redact(payload.get("message") or payload.get("evidence") or "", redactor),
-        file=_redact(payload.get("file") or "", redactor),
-        line=line,
-        confidence=_coerce_confidence(payload.get("confidence"), 1.0),
-        source=_coerce_sources(payload.get("source"), sources),
-        needs_human_review=needs_human_review,
-    )
-
-
-def _validate_finding(payload: dict[str, Any]) -> str:
-    missing = sorted(field for field in _REQUIRED_FINDING_FIELDS if field not in payload)
-    if missing:
-        return f"sandbox finding is missing required fields: {', '.join(missing)}"
-    severity = str(payload.get("severity") or "").lower()
-    if severity not in _VALID_SEVERITIES:
-        return f"sandbox finding has invalid severity {payload.get('severity')!r}"
-    category = _canonical_category(payload.get("category"), "")
-    if category not in _VALID_CATEGORIES:
-        return f"sandbox finding has invalid category {payload.get('category')!r}"
-    if _coerce_line(payload.get("line")) is None:
-        return f"sandbox finding has invalid line {payload.get('line')!r}"
-    confidence = _coerce_confidence(payload.get("confidence"), -1.0)
-    if confidence < 0.0:
-        return f"sandbox finding has invalid confidence {payload.get('confidence')!r}"
-    return ""
-
-
-def _finding_from_payload(
-    payload: dict[str, Any],
-    *,
-    sources: tuple[str, ...],
-    redactor: SecretRedactor | None,
-) -> Finding:
-    return Finding(
-        severity=str(payload.get("severity") or "low").lower(),
-        category=_canonical_category(payload.get("category")),
-        file=_redact(payload.get("file") or "", redactor),
-        line=_coerce_line(payload.get("line")) or 0,
-        title=_redact(payload.get("title") or "sandbox artifact finding", redactor),
-        evidence=_redact(payload.get("evidence") or "", redactor),
-        recommendation=_redact(payload.get("recommendation") or "Review the sandbox artifact output.", redactor),
-        confidence=float(payload.get("confidence") or 1.0),
-        source=_coerce_sources(payload.get("source"), sources),
-    )
-
-
-def _iter_payload_items(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    value = data.get(key)
-    if not value:
-        return []
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
 
 
 class SandboxArtifactLoader:
@@ -206,103 +123,80 @@ class SandboxArtifactLoader:
         self.redactor = redactor
 
     def load(self, runs: list[SandboxRun]) -> SandboxArtifacts:
-        findings: list[Finding] = []
-        warnings: list[ReviewWarning] = []
-        needs_human_review: list[ReviewWarning] = []
+        findings: list[OriginCandidate] = []
+        warnings: list[OriginCandidate] = []
+        needs_human_review: list[OriginCandidate] = []
+        validation_errors: list[OriginCandidate] = []
+        invalid_run_ids: set[str] = set()
+        buckets = {
+            "findings": findings,
+            "warnings": warnings,
+            "needs_human_review": needs_human_review,
+        }
 
         for run in runs:
             for path, content in sorted(run.output_files.items()):
-                sources = _sources_for_path(path)
+                origin = _origin(run, path)
+
+                def add_issue(title: str, message: str) -> None:
+                    invalid_run_ids.add(run.run_id)
+                    warning = _artifact_warning(
+                        title=title,
+                        message=message,
+                        origin=origin,
+                        redactor=self.redactor,
+                    )
+                    validation_errors.append(OriginCandidate(warning, origin))
+
                 try:
-                    data = json.loads(content)
-                except json.JSONDecodeError:
-                    needs_human_review.append(
-                        _artifact_warning(
-                            title="sandbox artifact is not valid JSON",
-                            message=f"{path} could not be parsed as JSON.",
-                            sources=sources,
-                            redactor=self.redactor,
-                        ))
+                    data = json.loads(content, parse_constant=_reject_nonfinite_json)
+                except (json.JSONDecodeError, ValueError, TypeError, OverflowError, RecursionError):
+                    add_issue(
+                        "sandbox artifact is not valid JSON",
+                        f"{origin.path} could not be parsed as strict JSON.",
+                    )
                     continue
                 if not isinstance(data, dict):
-                    needs_human_review.append(
-                        _artifact_warning(
-                            title="sandbox artifact has invalid schema",
-                            message=f"{path} must contain a JSON object.",
-                            sources=sources,
-                            redactor=self.redactor,
-                        ))
+                    add_issue(
+                        "sandbox artifact has invalid schema",
+                        f"{origin.path} must contain a JSON object.",
+                    )
                     continue
-                for item in _iter_payload_items(data, "findings"):
-                    try:
-                        reason = _validate_finding(item)
-                    except (TypeError, ValueError, OverflowError):
-                        reason = "sandbox finding could not be validated"
-                    if reason:
-                        needs_human_review.append(
-                            _artifact_warning(
-                                title="sandbox finding has invalid schema",
-                                message=f"{path}: {reason}",
-                                sources=sources,
-                                redactor=self.redactor,
-                            ))
+                if contains_unicode_surrogate(data):
+                    add_issue(
+                        "sandbox artifact contains invalid Unicode",
+                        f"{origin.path} contains non-UTF-8 Unicode data.",
+                    )
+                    continue
+
+                for key in _CANDIDATE_BUCKETS:
+                    if key not in data:
                         continue
-                    try:
-                        findings.append(_finding_from_payload(item, sources=sources, redactor=self.redactor))
-                    except (TypeError, ValueError, OverflowError):
-                        needs_human_review.append(
-                            _invalid_payload_warning(
-                                kind="finding",
-                                path=path,
-                                sources=sources,
-                                redactor=self.redactor,
-                            ))
-                for item in _iter_payload_items(data, "warnings"):
-                    try:
-                        warnings.append(
-                            _warning_from_payload(
-                                item,
-                                sources=sources,
-                                needs_human_review=False,
-                                redactor=self.redactor,
-                            ))
-                    except (TypeError, ValueError, OverflowError):
-                        needs_human_review.append(
-                            _invalid_payload_warning(
-                                kind="warning",
-                                path=path,
-                                sources=sources,
-                                redactor=self.redactor,
-                            ))
-                needs_value = data.get("needs_human_review")
-                if isinstance(needs_value, bool) and needs_value:
-                    needs_human_review.append(
-                        _artifact_warning(
-                            title="sandbox artifact requested human review",
-                            message=f"{path} set needs_human_review=true.",
-                            sources=sources,
-                            redactor=self.redactor,
-                        ))
-                for item in _iter_payload_items(data, "needs_human_review"):
-                    try:
-                        needs_human_review.append(
-                            _warning_from_payload(
-                                item,
-                                sources=sources,
-                                needs_human_review=True,
-                                redactor=self.redactor,
-                            ))
-                    except (TypeError, ValueError, OverflowError):
-                        needs_human_review.append(
-                            _invalid_payload_warning(
-                                kind="warning",
-                                path=path,
-                                sources=sources,
-                                redactor=self.redactor,
-                            ))
+                    values = data[key]
+                    if not isinstance(values, list):
+                        add_issue(
+                            f"sandbox artifact {key} has invalid schema",
+                            f"{origin.path}: {key} must be an array.",
+                        )
+                        continue
+                    for value in values:
+                        buckets[key].append(OriginCandidate(_clean_raw(value, self.redactor), origin))
+                        if not isinstance(value, dict):
+                            invalid_run_ids.add(run.run_id)
 
-        return SandboxArtifacts(findings=findings, warnings=warnings, needs_human_review=needs_human_review)
+        return SandboxArtifacts(
+            candidates=ReviewCandidates(
+                findings=findings,
+                warnings=warnings,
+                needs_human_review=needs_human_review,
+                validation_errors=validation_errors,
+            ),
+            invalid_run_ids=frozenset(invalid_run_ids),
+        )
 
 
-def load_sandbox_artifacts(runs: list[SandboxRun], redactor: SecretRedactor | None = None) -> SandboxArtifacts:
+def load_sandbox_artifacts(
+    runs: list[SandboxRun],
+    redactor: SecretRedactor | None = None,
+) -> SandboxArtifacts:
     return SandboxArtifactLoader(redactor=redactor).load(runs)

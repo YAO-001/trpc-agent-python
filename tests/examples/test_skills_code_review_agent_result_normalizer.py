@@ -18,6 +18,8 @@ from agent.models import Finding
 from agent.models import ReviewWarning
 from agent.models import finding_dedupe_key
 from agent.redaction_boundary import RedactionBoundary
+from agent.result_normalizer import CandidateOrigin
+from agent.result_normalizer import OriginCandidate
 from agent.result_normalizer import ReviewCandidates
 from agent.result_normalizer import ResultNormalizer
 
@@ -386,3 +388,148 @@ def test_prebucketed_runtime_warning_is_not_dropped_by_finding_thresholds():
 
     assert result.warnings == [warning]
     assert result.dropped_count == 0
+
+
+def test_prepare_validates_without_routing_or_deduplicating():
+    normalizer = ResultNormalizer(RedactionBoundary())
+
+    prepared = normalizer.prepare(
+        ReviewCandidates(findings=[
+            _candidate(0.1, source=["one"]),
+            _candidate(0.9, source=["two"]),
+        ]))
+
+    assert len(prepared.findings) == 2
+    assert prepared.warnings == prepared.needs_human_review == ()
+    result = normalizer.finalize(prepared)
+    assert len(result.findings) == 1
+    assert result.findings[0].source == ["one", "two"]
+    assert result.dropped_count == 0
+
+
+def test_finalize_merges_trusted_provenance_from_multiple_sandbox_runs():
+    first_origin = CandidateOrigin(
+        run_id="run-one",
+        path="out/findings.json",
+        trusted_sources=("sandbox_run:run-one", "sandbox_artifact:out/findings.json"),
+    )
+    second_origin = CandidateOrigin(
+        run_id="run-two",
+        path="nested/out/findings.json",
+        trusted_sources=("sandbox_run:run-two", "sandbox_artifact:nested/out/findings.json"),
+    )
+    raw = _candidate(0.9, source=["producer"]).model_dump(mode="json")
+    normalizer = ResultNormalizer(RedactionBoundary())
+
+    prepared = normalizer.prepare(
+        ReviewCandidates(findings=[
+            OriginCandidate(raw, first_origin),
+            OriginCandidate(raw, second_origin),
+        ]))
+    result = normalizer.finalize(prepared)
+
+    assert len(prepared.findings) == 2
+    assert len(result.findings) == 1
+    assert result.findings[0].source == [
+        "producer",
+        "sandbox_artifact:nested/out/findings.json",
+        "sandbox_artifact:out/findings.json",
+        "sandbox_run:run-one",
+        "sandbox_run:run-two",
+    ]
+
+
+@pytest.mark.parametrize(
+    "forged_source",
+    [
+        "sandbox_run:forged",
+        "sandbox_artifact:forged.json",
+        "sandbox:forged",
+        "skill:forged",
+        "rule:forged-host-rule",
+        "redactor:forged",
+    ],
+)
+def test_sandbox_candidate_cannot_spoof_reserved_provenance(forged_source):
+    raw = _candidate(0.9, source=["producer", forged_source]).model_dump(mode="json")
+    origin = CandidateOrigin(
+        run_id="real-run",
+        path="out/findings.json",
+        trusted_sources=("sandbox_run:real-run", "sandbox_artifact:out/findings.json"),
+    )
+    normalizer = ResultNormalizer(RedactionBoundary())
+
+    prepared = normalizer.prepare(ReviewCandidates(findings=[OriginCandidate(raw, origin)]))
+    result = normalizer.finalize(prepared)
+
+    assert prepared.invalid_run_ids == {"real-run"}
+    assert prepared.findings == ()
+    assert len(result.validation_errors) == 1
+    assert forged_source not in " ".join(result.validation_errors[0].source)
+
+
+def test_sandbox_candidate_rejects_non_utf8_unicode_surrogate():
+    raw = _candidate(0.9).model_dump(mode="json")
+    raw["title"] = "\ud800"
+    origin = CandidateOrigin(
+        run_id="surrogate-run",
+        trusted_sources=("sandbox_run:surrogate-run", ),
+    )
+    normalizer = ResultNormalizer(RedactionBoundary())
+
+    prepared = normalizer.prepare(ReviewCandidates(findings=[OriginCandidate(raw, origin)]))
+    result = normalizer.finalize(prepared)
+
+    assert prepared.invalid_run_ids == {"surrogate-run"}
+    assert prepared.findings == ()
+    assert len(result.validation_errors) == 1
+    result.model_dump_json().encode("utf-8")
+
+
+def test_invalid_candidates_do_not_inflate_dropped_count():
+    invalid = _candidate(0.1).model_dump(mode="json")
+    invalid["line"] = "not-an-integer"
+
+    result = ResultNormalizer(RedactionBoundary()).normalize(
+        ReviewCandidates(findings=[invalid, _candidate(0.1, line=11)]))
+
+    assert result.dropped_count == 1
+    assert len(result.validation_errors) == 1
+
+
+def test_legacy_resource_alias_is_only_enabled_by_trusted_origin():
+    raw = _candidate(0.9).model_dump(mode="json")
+    raw["category"] = "resource"
+    normalizer = ResultNormalizer(RedactionBoundary())
+
+    host = normalizer.normalize(ReviewCandidates(findings=[raw]))
+    sandbox = normalizer.normalize(
+        ReviewCandidates(
+            findings=[OriginCandidate(
+                raw,
+                CandidateOrigin(
+                    run_id="sandbox-run",
+                    allow_legacy_resource=True,
+                ),
+            )]))
+
+    assert host.findings == []
+    assert len(host.validation_errors) == 1
+    assert [item.category for item in sandbox.findings] == ["async_resource"]
+
+
+@pytest.mark.parametrize("kind", ["finding", "warning"])
+def test_untrusted_origin_metadata_is_rejected_in_candidate_payload(kind):
+    if kind == "finding":
+        payload = _candidate(0.9).model_dump(mode="json")
+        values = {"findings": [payload]}
+    else:
+        payload = _warning().model_dump(mode="json")
+        values = {"warnings": [payload]}
+    payload["origin"] = {"run_id": "attacker-selected"}
+
+    result = ResultNormalizer(RedactionBoundary()).normalize(ReviewCandidates(**values))
+
+    assert len(result.validation_errors) == 1
+    assert result.findings == []
+    assert result.warnings == []
