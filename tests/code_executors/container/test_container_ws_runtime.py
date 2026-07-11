@@ -1366,7 +1366,7 @@ class TestContainerWorkspaceRuntime:
 
         assert isinstance(caps, WorkspaceCapabilities)
         assert caps.isolation == "container"
-        assert caps.network_allowed is True
+        assert caps.network_allowed is False
         assert caps.read_only_mount is True
         assert caps.streaming is True
 
@@ -1444,11 +1444,14 @@ class TestCreateContainerWorkspaceRuntime:
     @patch("trpc_agent_sdk.code_executors.container._container_ws_runtime.ContainerClient")
     def test_with_container_config(self, mock_cc_cls):
         mock_cc_cls.return_value = _mock_container_client()
-        cfg = ContainerConfig(image="custom:latest")
+        cfg = ContainerConfig(image="custom:latest", host_config={"network_mode": "none", "tmpfs": {"/tmp": "size=8m"}})
         runtime = create_container_workspace_runtime(container_config=cfg, host_config=None, auto_inputs=False)
 
         assert isinstance(runtime, ContainerWorkspaceRuntime)
         mock_cc_cls.assert_called_once()
+        passed_config = mock_cc_cls.call_args.kwargs["config"]
+        assert passed_config.host_config == cfg.host_config
+        assert runtime.describe().max_disk_bytes == 0
 
     @patch("trpc_agent_sdk.code_executors.container._container_ws_runtime.ContainerClient")
     def test_without_container_config(self, mock_cc_cls):

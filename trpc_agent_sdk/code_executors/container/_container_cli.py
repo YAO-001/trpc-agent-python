@@ -248,6 +248,17 @@ class ContainerClient:
         working_dir = self.host_config.get("working_dir", "/")
         network_mode = self.host_config.get("network_mode", "none")
         auto_remove = self.host_config.get("auto_remove", True)
+        for key in (
+                "mem_limit",
+                "memswap_limit",
+                "nano_cpus",
+                "pids_limit",
+                "read_only",
+                "tmpfs",
+                "shm_size",
+        ):
+            if key in self.host_config:
+                run_kwargs[key] = self.host_config[key]
         run_kwargs.setdefault("command", command)
         run_kwargs.setdefault("stdin_open", stdin)
         run_kwargs.setdefault("working_dir", working_dir)

@@ -29,6 +29,18 @@ from .secret_redactor import SecretRedactor
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
 
+REVIEW_CONTAINER_HOST_CONFIG = {
+    "network_mode": "none",
+    "mem_limit": "256m",
+    "memswap_limit": "256m",
+    "nano_cpus": 1_000_000_000,
+    "pids_limit": 64,
+    "read_only": True,
+    "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=64m",
+    },
+}
+
 
 def create_skill_tool_set(runtime: str = "container"):
     from trpc_agent_sdk.code_executors import create_container_workspace_runtime
@@ -42,7 +54,7 @@ def create_skill_tool_set(runtime: str = "container"):
     if runtime == "local":
         workspace_runtime = create_local_workspace_runtime(read_only_staged_skill=True)
     else:
-        workspace_runtime = create_container_workspace_runtime()
+        workspace_runtime = create_container_workspace_runtime(host_config=REVIEW_CONTAINER_HOST_CONFIG)
     try:
         repository = FsSkillRepository(str(EXAMPLE_DIR / "skills"), workspace_runtime=workspace_runtime)
         return SkillToolSet(

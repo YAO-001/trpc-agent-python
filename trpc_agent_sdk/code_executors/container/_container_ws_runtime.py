@@ -943,6 +943,7 @@ class ContainerWorkspaceRuntime(BaseWorkspaceRuntime):
         """
         self.container = container
         self._closed = False
+        self._host_config = dict(host_config or {})
 
         # Build runtime configuration
         config = RuntimeConfig(auto_map_inputs=auto_inputs)
@@ -1013,10 +1014,42 @@ class ContainerWorkspaceRuntime(BaseWorkspaceRuntime):
         """Get the workspace capabilities."""
         return WorkspaceCapabilities(
             isolation="container",
-            network_allowed=True,
+            network_allowed=self._host_config.get("network_mode", "none") != "none",
             read_only_mount=True,
             streaming=True,
+            max_disk_bytes=self._tmpfs_disk_limit(),
         )
+
+    def _tmpfs_disk_limit(self) -> int:
+        """Return the aggregate byte limit declared by Docker tmpfs mounts."""
+        if self._host_config.get("read_only") is not True:
+            return 0
+        for bind in self._host_config.get("Binds", ()):
+            parts = str(bind).rsplit(":", 1)
+            options = parts[-1].split(",") if len(parts) == 2 else []
+            if "ro" not in options:
+                return 0
+        total = 0
+        for options in self._host_config.get("tmpfs", {}).values():
+            mount_limit = None
+            for option in str(options).split(","):
+                if not option.startswith("size="):
+                    continue
+                raw_size = option.removeprefix("size=").strip().lower()
+                multiplier = 1
+                if raw_size.endswith(("k", "m", "g")):
+                    multiplier = {"k": 1024, "m": 1024**2, "g": 1024**3}[raw_size[-1]]
+                    raw_size = raw_size[:-1]
+                try:
+                    mount_limit = int(raw_size) * multiplier
+                except ValueError:
+                    return 0
+                if mount_limit <= 0:
+                    return 0
+            if mount_limit is None:
+                return 0
+            total += mount_limit
+        return total
 
 
 def create_container_workspace_runtime(
@@ -1034,17 +1067,20 @@ def create_container_workspace_runtime(
     Returns:
         ContainerWorkspaceRuntime instance
     """
+    effective_host_config = host_config
+    if effective_host_config is None and container_config is not None:
+        effective_host_config = container_config.host_config
     if container_config:
         cfg = ContainerConfig(base_url=container_config.base_url,
                               image=container_config.image,
                               docker_path=container_config.docker_path,
-                              host_config=host_config)
+                              host_config=effective_host_config)
         container = ContainerClient(config=cfg)
     else:
-        container = ContainerClient(config=ContainerConfig(host_config=host_config))
+        container = ContainerClient(config=ContainerConfig(host_config=effective_host_config))
     return ContainerWorkspaceRuntime(
         container=container,
-        host_config=host_config,
+        host_config=effective_host_config,
         auto_inputs=auto_inputs,
         provider=provider,
         enable_provider_env=enable_provider_env,
