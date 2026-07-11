@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -31,6 +30,7 @@ from .models import FilterIntercept
 from .models import ReviewWarning
 from .models import SandboxRun
 from .models import utc_now
+from .process_limits import run_capped_process
 from .redaction_boundary import RedactionBoundary
 from .result_normalizer import PreparedCandidates
 from .result_normalizer import ResultNormalizer
@@ -41,6 +41,7 @@ from .secret_redactor import SecretRedactor
 
 MAX_STDOUT_CHARS = 12000
 MAX_STDERR_CHARS = 12000
+_run_capped_process = run_capped_process
 _POSIX_LAUNCH_ENV_KEYS = frozenset({
     "PATH",
     "TMPDIR",
@@ -110,20 +111,21 @@ def _normalize_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _read_output_file(path: Path, *, limit: int) -> tuple[str, bool]:
-    raw = path.read_bytes()
-    truncated = len(raw) > limit
-    if truncated:
-        raw = raw[:limit]
+def _read_output_file(path: Path, *, limit_bytes: int) -> tuple[str, bool, int]:
+    if type(limit_bytes) is not int or limit_bytes < 0:
+        raise ValueError("output file byte limit must be a non-negative integer")
+    observed = path.stat().st_size
+    with path.open("rb") as stream:
+        raw = stream.read(limit_bytes)
+    truncated = observed > limit_bytes
     text = raw.decode("utf-8", errors="replace")
-    if truncated:
-        text += f"\n[TRUNCATED: kept first {limit} bytes]\n"
-    return text, truncated
+    bounded_text, decode_truncated = _truncate_utf8_bytes(text, limit_bytes)
+    return bounded_text, truncated or decode_truncated, observed
 
 
 def _sanitize_stream(text: object, *, boundary: RedactionBoundary, limit: int) -> tuple[str, bool]:
     redacted = _normalize_newlines(boundary.text(text).text)
-    return _truncate_text(redacted, limit)
+    return _truncate_utf8_bytes(redacted, limit)
 
 
 def _sanitize_output_mapping(
@@ -256,12 +258,32 @@ def _validated_returned_run(
         raise ValueError("sandbox returned mismatched run identity")
     payload = value.model_dump(mode="json")
     payload["failure_reason"] = ""
-    if value.timed_out:
+    output_limit_evidence = (
+        value.termination_reason == "output_limit_exceeded" and value.execution_started and value.exit_code != 0
+        and value.termination_confirmed
+        and (value.stdout_bytes_observed > MAX_STDOUT_CHARS or value.stderr_bytes_observed > MAX_STDERR_CHARS
+             or value.output_bytes_observed > min(request.output_budget_bytes, request.output_spec.max_total_bytes)))
+    orchestration_evidence = (value.termination_reason == "orchestration_error" and value.execution_started
+                              and value.exit_code != 0)
+    if orchestration_evidence:
+        payload["failure_kind"] = "orchestration_error"
+        payload["termination_reason"] = "orchestration_error"
+    elif output_limit_evidence:
+        payload["failure_kind"] = "output_limit_exceeded"
+        payload["termination_reason"] = "output_limit_exceeded"
+        payload["stdout_truncated"] = value.stdout_bytes_observed > MAX_STDOUT_CHARS
+        payload["stderr_truncated"] = value.stderr_bytes_observed > MAX_STDERR_CHARS
+        payload["output_truncated"] = (value.output_bytes_observed > min(request.output_budget_bytes,
+                                                                         request.output_spec.max_total_bytes))
+    elif value.timed_out:
         payload["failure_kind"] = "execution_timeout"
+        payload["termination_reason"] = "execution_timeout"
     elif value.exit_code != 0:
         payload["failure_kind"] = "execution_nonzero"
+        payload["termination_reason"] = ""
     else:
         payload["failure_kind"] = ""
+        payload["termination_reason"] = ""
     cleaned = boundary.clean(payload)
     json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
     return SandboxRun.model_validate(cleaned)
@@ -322,9 +344,10 @@ class LocalSkillHarness:
         workspace_root: Path,
         cwd: Path,
         request: ExecutionRequest,
-    ) -> tuple[dict[str, str], bool]:
+    ) -> tuple[dict[str, str], bool, int]:
         output_map: dict[str, str] = {}
         output_truncated = False
+        output_bytes_observed = 0
         max_files = request.output_spec.max_files
         max_file_bytes = request.output_spec.max_file_bytes
         for pattern in request.output_spec.globs:
@@ -334,11 +357,12 @@ class LocalSkillHarness:
                     continue
                 if len(output_map) >= max_files:
                     output_truncated = True
-                    return output_map, output_truncated
-                content, truncated = _read_output_file(path, limit=max_file_bytes)
+                    return output_map, output_truncated, output_bytes_observed
+                content, truncated, observed = _read_output_file(path, limit_bytes=max_file_bytes)
                 output_truncated = output_truncated or truncated
                 output_map[path.relative_to(cwd).as_posix()] = content
-        return output_map, output_truncated
+                output_bytes_observed += observed
+        return output_map, output_truncated, output_bytes_observed
 
     def _run_request(
         self,
@@ -353,27 +377,20 @@ class LocalSkillHarness:
         host_command = list(logical_command)
         if host_command[0] == "python3":
             host_command[0] = sys.executable
-        try:
-            result = subprocess.run(
-                host_command,
-                cwd=str(cwd),
-                check=False,
-                capture_output=True,
-                text=True,
-                input=request.stdin,
-                timeout=request.timeout_seconds,
-                env=_safe_env(request=request),
-            )
-            timed_out = False
-            exit_code = result.returncode
-            stdout = result.stdout
-            stderr = result.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            exit_code = -1
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or "command timed out"
-        output_map, file_truncated = self._collect_outputs(
+        result = _run_capped_process(
+            host_command,
+            cwd=cwd,
+            env=_safe_env(request=request),
+            stdin=request.stdin,
+            timeout_seconds=request.timeout_seconds,
+            stdout_limit_bytes=MAX_STDOUT_CHARS,
+            stderr_limit_bytes=MAX_STDERR_CHARS,
+            output_paths=[
+                workspace_root.joinpath(*PurePosixPath(pattern).parts) for pattern in request.output_spec.globs
+            ],
+            output_limit_bytes=min(request.output_budget_bytes, request.output_spec.max_total_bytes),
+        )
+        output_map, file_truncated, collected_output_bytes = self._collect_outputs(
             workspace_root=workspace_root,
             cwd=cwd,
             request=request,
@@ -386,8 +403,15 @@ class LocalSkillHarness:
             max_file_bytes=request.output_spec.max_file_bytes,
             max_total_bytes=min(request.output_budget_bytes, request.output_spec.max_total_bytes),
         )
-        stdout, stdout_truncated = _sanitize_stream(stdout, boundary=self.boundary, limit=MAX_STDOUT_CHARS)
-        stderr, stderr_truncated = _sanitize_stream(stderr, boundary=self.boundary, limit=MAX_STDERR_CHARS)
+        stdout, sanitized_stdout_truncated = _sanitize_stream(result.stdout,
+                                                              boundary=self.boundary,
+                                                              limit=MAX_STDOUT_CHARS)
+        stderr, sanitized_stderr_truncated = _sanitize_stream(result.stderr,
+                                                              boundary=self.boundary,
+                                                              limit=MAX_STDERR_CHARS)
+        stdout_truncated = result.stdout_truncated or sanitized_stdout_truncated
+        stderr_truncated = result.stderr_truncated or sanitized_stderr_truncated
+        output_truncated = result.output_truncated or output_truncated
         payload = self.boundary.clean({
             "run_id": "sandbox_" + request.request_id.replace(":", "_"),
             "task_id": request.task_id,
@@ -395,8 +419,8 @@ class LocalSkillHarness:
             "runtime": "local",
             "command": logical_command,
             "decision": "allow",
-            "exit_code": exit_code,
-            "timed_out": timed_out,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
             "duration_ms": 0 if dry_run else int((time.perf_counter() - started) * 1000),
             "stdout": stdout,
             "stderr": stderr,
@@ -404,7 +428,14 @@ class LocalSkillHarness:
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
             "output_truncated": output_truncated,
-            "warning": "" if exit_code == 0 and not timed_out else "sandbox command failed or timed out",
+            "termination_reason": result.termination_reason,
+            "termination_confirmed": result.termination_confirmed,
+            "execution_started": result.execution_started,
+            "stdout_bytes_observed": result.stdout_bytes_observed,
+            "stderr_bytes_observed": result.stderr_bytes_observed,
+            "output_bytes_observed": max(result.output_bytes_observed, collected_output_bytes),
+            "failure_kind": result.failure_kind,
+            "warning": "" if result.exit_code == 0 and not result.timed_out else "sandbox command failed or timed out",
             "created_at": utc_now(dry_run),
         })
         return SandboxRun.model_validate(payload)
@@ -653,14 +684,17 @@ class SandboxRunner:
             artifacts = load_sandbox_artifacts([run], redactor=_BoundaryRedactor(self.boundary))
             prepared = normalizer.prepare(artifacts.candidates)
             invalid_run_ids = {*artifacts.invalid_run_ids, *prepared.invalid_run_ids}
-            if run.run_id in invalid_run_ids:
+            if (run.run_id in invalid_run_ids and run.exit_code == 0 and not run.timed_out and not run.failure_kind
+                    and not run.termination_reason):
                 payload = run.model_dump(mode="json")
                 payload.update({
                     "failure_kind": "artifact_invalid",
                     "failure_reason": "sandbox output artifact failed schema validation",
                 })
                 run = SandboxRun.model_validate(self.boundary.clean(payload))
-            if (run.exit_code != 0 or run.timed_out) and not prepared.needs_human_review:
+            execution_failed = run.exit_code != 0 or run.timed_out
+            artifact_invalid = run.run_id in invalid_run_ids
+            if execution_failed and (artifact_invalid or not prepared.needs_human_review):
                 needs_human_review.append(_failure_warning(run, boundary=self.boundary))
             runs.append(run)
             prepared_batches.append(prepared)

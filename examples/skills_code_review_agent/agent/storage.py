@@ -123,6 +123,12 @@ sandbox_runs = Table(
     Column("output_truncated", Boolean, nullable=False, default=False),
     Column("output_file_count", Integer, nullable=False, default=0),
     Column("output_bytes", Integer, nullable=False, default=0),
+    Column("termination_reason", String(64), nullable=False, server_default=""),
+    Column("termination_confirmed", Boolean, nullable=False, default=False),
+    Column("execution_started", Boolean, nullable=False, default=False),
+    Column("stdout_bytes_observed", Integer, nullable=False, default=0),
+    Column("stderr_bytes_observed", Integer, nullable=False, default=0),
+    Column("output_bytes_observed", Integer, nullable=False, default=0),
     Column("failure_kind", String(64), nullable=False, server_default=""),
     Column("failure_reason", Text, nullable=True),
     Column("warning", Text, nullable=False),
@@ -454,6 +460,18 @@ class ReviewStorage:
             payload["output_file_count"],
             "output_bytes":
             payload["output_bytes"],
+            "termination_reason":
+            payload["termination_reason"],
+            "termination_confirmed":
+            payload["termination_confirmed"],
+            "execution_started":
+            payload["execution_started"],
+            "stdout_bytes_observed":
+            payload["stdout_bytes_observed"],
+            "stderr_bytes_observed":
+            payload["stderr_bytes_observed"],
+            "output_bytes_observed":
+            payload["output_bytes_observed"],
             "failure_kind":
             payload["failure_kind"],
             "failure_reason":
@@ -568,6 +586,12 @@ class ReviewStorage:
                 "output_truncated": row["output_truncated"],
                 "output_file_count": row["output_file_count"],
                 "output_bytes": row["output_bytes"],
+                "termination_reason": row["termination_reason"],
+                "termination_confirmed": row["termination_confirmed"],
+                "execution_started": row["execution_started"],
+                "stdout_bytes_observed": row["stdout_bytes_observed"],
+                "stderr_bytes_observed": row["stderr_bytes_observed"],
+                "output_bytes_observed": row["output_bytes_observed"],
                 "failure_kind": row["failure_kind"],
                 "failure_reason": row["failure_reason"] or "",
                 "warning": row["warning"],

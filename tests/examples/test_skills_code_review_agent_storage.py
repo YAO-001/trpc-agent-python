@@ -229,7 +229,11 @@ def test_new_database_records_all_bundled_migrations(tmp_path):
     with storage.engine.connect() as conn:
         versions = conn.exec_driver_sql("SELECT version FROM schema_migrations ORDER BY version").scalars().all()
 
-    assert versions == ["002_review_lifecycle", "003_request_identity"]
+    assert versions == [
+        "002_review_lifecycle",
+        "003_request_identity",
+        "004_review_telemetry",
+    ]
 
 
 def _storage_with_constraint_parent(tmp_path, database_kind):
@@ -370,6 +374,7 @@ def test_legacy_database_migrates_without_losing_audit_rows(tmp_path):
         assert versions == [
             ("002_review_lifecycle", 1),
             ("003_request_identity", 1),
+            ("004_review_telemetry", 1),
         ]
         assert conn.exec_driver_sql("SELECT count(*) FROM sandbox_runs").scalar_one() == 1
         assert conn.exec_driver_sql("SELECT count(*) FROM filter_intercepts").scalar_one() == 1
@@ -429,6 +434,7 @@ def test_request_identity_migration_backfills_only_empty_ids_and_preserves_audit
     assert versions == [
         ("002_review_lifecycle", 1),
         ("003_request_identity", 1),
+        ("004_review_telemetry", 1),
     ]
 
 
@@ -548,6 +554,12 @@ def test_storage_roundtrip_by_task_id(tmp_path):
             command=["python3", "scripts/run_static_review.py"],
             decision="allow",
             output_files={"out/findings.json": "{}"},
+            termination_reason="output_limit_exceeded",
+            termination_confirmed=True,
+            execution_started=True,
+            stdout_bytes_observed=8192,
+            stderr_bytes_observed=17,
+            output_bytes_observed=4096,
         )
     ])
     storage.save_findings(task.task_id, [finding])
@@ -564,6 +576,12 @@ def test_storage_roundtrip_by_task_id(tmp_path):
     assert rows["findings"][0]["title"] == "danger"
     assert rows["sandbox_runs"][0]["output_file_count"] == 1
     assert rows["sandbox_runs"][0]["output_bytes"] == 2
+    assert rows["sandbox_runs"][0]["termination_reason"] == "output_limit_exceeded"
+    assert rows["sandbox_runs"][0]["termination_confirmed"] is True
+    assert rows["sandbox_runs"][0]["execution_started"] is True
+    assert rows["sandbox_runs"][0]["stdout_bytes_observed"] == 8192
+    assert rows["sandbox_runs"][0]["stderr_bytes_observed"] == 17
+    assert rows["sandbox_runs"][0]["output_bytes_observed"] == 4096
     assert "redacted evidence" in storage.dump_task_text(task.task_id)
 
 

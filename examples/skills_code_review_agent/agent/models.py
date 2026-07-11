@@ -206,6 +206,12 @@ class SandboxRun(BaseModel):
     output_truncated: bool = False
     output_file_count: int = 0
     output_bytes: int = 0
+    termination_reason: str = ""
+    termination_confirmed: bool = False
+    execution_started: bool = False
+    stdout_bytes_observed: int = 0
+    stderr_bytes_observed: int = 0
+    output_bytes_observed: int = 0
     failure_kind: str = ""
     failure_reason: str = ""
     warning: str = ""

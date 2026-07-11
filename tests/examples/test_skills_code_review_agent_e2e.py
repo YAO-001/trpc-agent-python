@@ -24,6 +24,7 @@ from agent.input_resolver import EXAMPLE_DIR
 from agent.models import Finding
 from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
+from agent.process_limits import CappedProcessResult
 from agent.redaction_boundary import RedactionBoundary
 from agent.result_normalizer import ResultNormalizer
 from agent.sandbox_artifact_loader import load_sandbox_artifacts
@@ -320,13 +321,13 @@ def test_explicit_local_harness_does_not_inherit_sensitive_host_env(monkeypatch)
     for name, value in host_values.items():
         monkeypatch.setenv(name, value)
     captured_envs = []
-    real_run = sandbox_module.subprocess.run
+    real_run = sandbox_module._run_capped_process
 
     def checked_run(*args, **kwargs):
         captured_envs.append(dict(kwargs["env"]))
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(sandbox_module.subprocess, "run", checked_run)
+    monkeypatch.setattr(sandbox_module, "_run_capped_process", checked_run)
     runner = SandboxRunner(
         example_dir=EXAMPLE_DIR,
         policy=ReviewExecutionPolicy(dry_run=True),
@@ -380,9 +381,24 @@ def test_explicit_local_harness_uses_only_the_request_contract(monkeypatch):
             output_path = workspace_root.joinpath(*request.output_spec.globs[0].split("/"))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text("{}", encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return CappedProcessResult(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                timed_out=False,
+                failure_kind="",
+                termination_reason="",
+                termination_confirmed=True,
+                execution_started=True,
+                stdout_truncated=False,
+                stderr_truncated=False,
+                output_truncated=False,
+                stdout_bytes_observed=0,
+                stderr_bytes_observed=0,
+                output_bytes_observed=2,
+            )
 
-        monkeypatch.setattr(sandbox_module.subprocess, "run", capture_run)
+        monkeypatch.setattr(sandbox_module, "_run_capped_process", capture_run)
         result = runner.run(
             task_id=request.task_id,
             review_input=review_input,
@@ -399,8 +415,8 @@ def test_explicit_local_harness_uses_only_the_request_contract(monkeypatch):
     expected_env.update({item.name: item.value for item in request.env})
     assert captured["command"] == [sys.executable, *request.command_argv[1:]]
     assert Path(captured["cwd"]).as_posix().endswith(request.cwd.removeprefix("$SKILLS_DIR"))
-    assert captured["input"] == request.stdin
-    assert captured["timeout"] == request.timeout_seconds
+    assert captured["stdin"] == request.stdin
+    assert captured["timeout_seconds"] == request.timeout_seconds
     assert captured["env"] == expected_env
     assert result.runs[0].command == list(request.command_argv)
     assert result.runs[0].output_files == {"out/smoke.json": "{}"}
