@@ -14,9 +14,11 @@ import pytest
 from agent.models import Finding
 from agent.models import RedactionSummary
 from agent.models import ReviewTask
+from agent.models import ReviewTaskStatus
 from agent.models import SandboxRun
 from agent.models import TelemetrySummary
 from agent.storage import ReviewStorage
+from agent.task_state import transition_task
 
 LEGACY_SCHEMA = """
 CREATE TABLE review_tasks (
@@ -415,3 +417,91 @@ def test_storage_roundtrip_by_task_id(tmp_path):
     assert rows["sandbox_runs"][0]["output_file_count"] == 1
     assert rows["sandbox_runs"][0]["output_bytes"] == 2
     assert "redacted evidence" in storage.dump_task_text(task.task_id)
+
+
+def test_create_task_with_input_persists_both_rows_atomically(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    task = ReviewTask(
+        task_id="task-created-with-input",
+        input_type="fixture",
+        dry_run=True,
+    )
+
+    storage.create_task_with_input(
+        task=task,
+        redacted_diff="redacted diff",
+        changed_files=["src/app.py"],
+        redaction_summary=RedactionSummary(),
+        input_metadata={"fixture_names": ["clean"]},
+    )
+    rows = storage.query_task(task.task_id)
+
+    assert rows["task"]["status"] == ReviewTaskStatus.CREATED.value
+    assert rows["input"]["redacted_diff"] == "redacted diff"
+
+
+def test_create_task_with_input_rejects_non_created_status_without_partial_rows(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    created = ReviewTask(
+        task_id="task-running-with-input",
+        input_type="fixture",
+        dry_run=True,
+    )
+    running = transition_task(created, ReviewTaskStatus.RUNNING)
+
+    with pytest.raises(ValueError, match="initial task must be created"):
+        storage.create_task_with_input(
+            task=running,
+            redacted_diff="",
+            changed_files=[],
+            redaction_summary=RedactionSummary(),
+            input_metadata={},
+        )
+
+    rows = storage.query_task(created.task_id)
+    assert rows["review_tasks"] == []
+    assert rows["review_inputs"] == []
+
+
+def test_update_task_rejects_unknown_task(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    task = ReviewTask(
+        task_id="missing-task",
+        input_type="fixture",
+        dry_run=True,
+    )
+
+    with pytest.raises(KeyError, match="unknown review task missing-task"):
+        storage.update_task(task)
+
+
+def test_storage_rejects_secret_bearing_task_identities_without_partial_rows(tmp_path):
+    storage = ReviewStorage(f"sqlite:///{tmp_path / 'review.db'}")
+    for raw_task_id in (
+            "token:dummy-105690",
+            "token:production-104491",
+    ):
+        created = ReviewTask(
+            task_id=raw_task_id,
+            input_type="fixture",
+            dry_run=True,
+        )
+        with pytest.raises(ValueError, match="task_id must not contain secret material") as create_error:
+            storage.create_task_with_input(
+                task=created,
+                redacted_diff="",
+                changed_files=[],
+                redaction_summary=RedactionSummary(),
+                input_metadata={},
+            )
+        assert raw_task_id not in str(create_error.value)
+        with pytest.raises(ValueError, match="task_id must not contain secret material"):
+            storage.update_task(transition_task(created, ReviewTaskStatus.RUNNING))
+        with pytest.raises(ValueError, match="task_id must not contain secret material"):
+            storage.query_task(raw_task_id)
+        with pytest.raises(ValueError, match="task_id must not contain secret material"):
+            storage.reset_task(raw_task_id)
+
+    with storage.engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT count(*) FROM review_tasks").scalar_one() == 0
+        assert conn.exec_driver_sql("SELECT count(*) FROM review_inputs").scalar_one() == 0

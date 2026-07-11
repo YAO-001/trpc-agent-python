@@ -149,15 +149,33 @@ class ReviewWarning(BaseModel):
 
 class FilterIntercept(BaseModel):
     intercept_id: str
-    task_id: str = ""
-    request_id: str = ""
+    task_id: str
+    request_id: str
     decision: str
-    error_kind: str = ""
+    error_kind: str
     reason: str
     command: list[str] = Field(default_factory=list)
     runtime: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
+
+    @field_validator("intercept_id", "task_id", "request_id")
+    @classmethod
+    def _require_nonempty_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("filter identity fields must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_error_kind(self) -> "FilterIntercept":
+        expected = {
+            "allow": "",
+            "deny": "policy_denied",
+            "needs_human_review": "approval_required",
+        }.get(self.decision)
+        if expected is None or self.error_kind != expected:
+            raise ValueError("filter decision and error kind do not match")
+        return self
 
 
 class SandboxRun(BaseModel):

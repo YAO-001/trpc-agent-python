@@ -33,6 +33,7 @@ from .models import Finding
 from .models import RedactionSummary
 from .models import ReviewReport
 from .models import ReviewTask
+from .models import ReviewTaskStatus
 from .models import SandboxRun
 from .models import TelemetrySummary
 from .redaction_boundary import RedactionBoundary
@@ -50,6 +51,12 @@ _JSON_BLOB_FIELDS = frozenset({
     "redaction_summary_json",
     "source_json",
     "summary_json",
+})
+_IDENTITY_FIELDS = frozenset({
+    "task_id",
+    "request_id",
+    "run_id",
+    "intercept_id",
 })
 metadata = MetaData()
 
@@ -293,12 +300,21 @@ class ReviewStorage:
             details = ", ".join(f"{table}={count}" for table, count in orphan_counts.items())
             raise RuntimeError(f"orphan task rows prevent migration {path.stem}: {details}")
 
+    def _safe_identity(self, field: str, value: object) -> str:
+        safe = self.boundary.text(value).text
+        if safe != value:
+            raise ValueError(f"{field} must not contain secret material")
+        return safe
+
     def _safe_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        ordinary = {key: value for key, value in row.items() if key not in _JSON_BLOB_FIELDS}
+        prepared = dict(row)
+        for field in _IDENTITY_FIELDS & prepared.keys():
+            prepared[field] = self._safe_identity(field, prepared[field])
+        ordinary = {key: value for key, value in prepared.items() if key not in _JSON_BLOB_FIELDS}
         safe = self.boundary.clean(ordinary)
         if not isinstance(safe, dict):  # pragma: no cover - caller contract
             raise TypeError("storage row must remain a mapping after redaction")
-        for field, value in row.items():
+        for field, value in prepared.items():
             if field not in _JSON_BLOB_FIELDS:
                 continue
             safe_field = self.boundary.text(field).text
@@ -327,8 +343,109 @@ class ReviewStorage:
         if path.parent:
             path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _task_row(self, task: ReviewTask) -> dict[str, Any]:
+        payload = self._safe_row(task.model_dump(mode="json"))
+        return ReviewTask.model_validate(payload).model_dump(mode="json")
+
+    def _input_row(
+        self,
+        task_id: str,
+        *,
+        redacted_diff: str,
+        changed_files: list[str],
+        redaction_summary: RedactionSummary,
+        input_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._safe_row({
+            "task_id": task_id,
+            "redacted_diff": redacted_diff,
+            "changed_files": changed_files,
+            "redaction_summary": redaction_summary.model_dump(mode="json"),
+            "input_metadata": input_metadata,
+        })
+        return self._safe_row({
+            "task_id":
+            payload["task_id"],
+            "redacted_diff":
+            payload["redacted_diff"],
+            "changed_files_json":
+            json.dumps(payload["changed_files"], ensure_ascii=False, sort_keys=True),
+            "redaction_summary_json":
+            json.dumps(
+                payload["redaction_summary"],
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "input_metadata_json":
+            json.dumps(payload["input_metadata"], ensure_ascii=False, sort_keys=True),
+        })
+
+    def _filter_row(self, item: FilterIntercept) -> dict[str, Any]:
+        safe_item = FilterIntercept.model_validate(self._safe_row(item.model_dump(mode="json")))
+        payload = safe_item.model_dump(mode="json")
+        return self._safe_row({
+            "intercept_id": payload["intercept_id"],
+            "task_id": payload["task_id"],
+            "request_id": payload["request_id"],
+            "decision": payload["decision"],
+            "error_kind": payload["error_kind"],
+            "reason": payload["reason"],
+            "command_json": json.dumps(payload["command"], ensure_ascii=False, sort_keys=True),
+            "runtime": payload["runtime"],
+            "metadata_json": json.dumps(payload["metadata"], ensure_ascii=False, sort_keys=True),
+            "created_at": payload["created_at"],
+        })
+
+    def _sandbox_row(self, item: SandboxRun) -> dict[str, Any]:
+        safe_item = SandboxRun.model_validate(self._safe_row(item.model_dump(mode="json")))
+        payload = safe_item.model_dump(mode="json")
+        return self._safe_row({
+            "run_id":
+            payload["run_id"],
+            "task_id":
+            payload["task_id"],
+            "request_id":
+            payload["request_id"],
+            "runtime":
+            payload["runtime"],
+            "command_json":
+            json.dumps(payload["command"], ensure_ascii=False, sort_keys=True),
+            "decision":
+            payload["decision"],
+            "exit_code":
+            payload["exit_code"],
+            "timed_out":
+            payload["timed_out"],
+            "duration_ms":
+            payload["duration_ms"],
+            "stdout":
+            payload["stdout"],
+            "stderr":
+            payload["stderr"],
+            "output_files_json":
+            json.dumps(payload["output_files"], ensure_ascii=False, sort_keys=True),
+            "stdout_truncated":
+            payload["stdout_truncated"],
+            "stderr_truncated":
+            payload["stderr_truncated"],
+            "output_truncated":
+            payload["output_truncated"],
+            "output_file_count":
+            payload["output_file_count"],
+            "output_bytes":
+            payload["output_bytes"],
+            "failure_kind":
+            payload["failure_kind"],
+            "failure_reason":
+            payload["failure_reason"] or None,
+            "warning":
+            payload["warning"],
+            "created_at":
+            payload["created_at"],
+        })
+
     def reset_task(self, task_id: str) -> None:
-        task_id = self.boundary.text(task_id).text
+        task_id = self._safe_identity("task_id", task_id)
         with self.engine.begin() as conn:
             for table in [
                     reports,
@@ -342,9 +459,36 @@ class ReviewStorage:
                 conn.execute(delete(table).where(table.c.task_id == task_id))
 
     def save_task(self, task: ReviewTask) -> None:
-        row = self._safe_row(task.model_dump(mode="json"))
         with self.engine.begin() as conn:
-            conn.execute(review_tasks.insert().values(**row))
+            conn.execute(review_tasks.insert().values(**self._task_row(task)))
+
+    def create_task_with_input(
+        self,
+        *,
+        task: ReviewTask,
+        redacted_diff: str,
+        changed_files: list[str],
+        redaction_summary: RedactionSummary,
+        input_metadata: dict[str, Any],
+    ) -> None:
+        if task.status != ReviewTaskStatus.CREATED:
+            raise ValueError("initial task must be created")
+        with self.engine.begin() as conn:
+            conn.execute(review_tasks.insert().values(**self._task_row(task)))
+            conn.execute(review_inputs.insert().values(**self._input_row(
+                task.task_id,
+                redacted_diff=redacted_diff,
+                changed_files=changed_files,
+                redaction_summary=redaction_summary,
+                input_metadata=input_metadata,
+            )))
+
+    def update_task(self, task: ReviewTask) -> None:
+        row = self._task_row(task)
+        with self.engine.begin() as conn:
+            result = conn.execute(review_tasks.update().where(review_tasks.c.task_id == row["task_id"]).values(**row))
+            if result.rowcount != 1:
+                raise KeyError(f"unknown review task {row['task_id']}")
 
     def save_input(
         self,
@@ -355,27 +499,14 @@ class ReviewStorage:
         redaction_summary: RedactionSummary,
         input_metadata: dict[str, Any],
     ) -> None:
-        payload = self._safe_row({
-            "task_id": task_id,
-            "redacted_diff": redacted_diff,
-            "changed_files": changed_files,
-            "redaction_summary": redaction_summary.model_dump(mode="json"),
-            "input_metadata": input_metadata,
-        })
-        row = self._safe_row({
-            "task_id":
-            payload["task_id"],
-            "redacted_diff":
-            payload["redacted_diff"],
-            "changed_files_json":
-            json.dumps(payload["changed_files"], ensure_ascii=False, sort_keys=True),
-            "redaction_summary_json":
-            json.dumps(payload["redaction_summary"], ensure_ascii=False, sort_keys=True),
-            "input_metadata_json":
-            json.dumps(payload["input_metadata"], ensure_ascii=False, sort_keys=True),
-        })
         with self.engine.begin() as conn:
-            conn.execute(review_inputs.insert().values(**row))
+            conn.execute(review_inputs.insert().values(**self._input_row(
+                task_id,
+                redacted_diff=redacted_diff,
+                changed_files=changed_files,
+                redaction_summary=redaction_summary,
+                input_metadata=input_metadata,
+            )))
 
     def save_findings(self, task_id: str, items: list[Finding]) -> None:
         if not items:
@@ -403,77 +534,23 @@ class ReviewStorage:
     def save_sandbox_runs(self, items: list[SandboxRun]) -> None:
         if not items:
             return
-        rows = []
-        for item in items:
-            payload = SandboxRun.model_validate(self._safe_row(item.model_dump(mode="json"))).model_dump(mode="json")
-            rows.append(
-                self._safe_row({
-                    "run_id":
-                    payload["run_id"],
-                    "task_id":
-                    payload["task_id"],
-                    "request_id":
-                    payload["request_id"],
-                    "runtime":
-                    payload["runtime"],
-                    "command_json":
-                    json.dumps(payload["command"], ensure_ascii=False, sort_keys=True),
-                    "decision":
-                    payload["decision"],
-                    "exit_code":
-                    payload["exit_code"],
-                    "timed_out":
-                    payload["timed_out"],
-                    "duration_ms":
-                    payload["duration_ms"],
-                    "stdout":
-                    payload["stdout"],
-                    "stderr":
-                    payload["stderr"],
-                    "output_files_json":
-                    json.dumps(payload["output_files"], ensure_ascii=False, sort_keys=True),
-                    "stdout_truncated":
-                    payload["stdout_truncated"],
-                    "stderr_truncated":
-                    payload["stderr_truncated"],
-                    "output_truncated":
-                    payload["output_truncated"],
-                    "output_file_count":
-                    payload["output_file_count"],
-                    "output_bytes":
-                    payload["output_bytes"],
-                    "failure_kind":
-                    payload["failure_kind"],
-                    "failure_reason":
-                    payload["failure_reason"] or None,
-                    "warning":
-                    payload["warning"],
-                    "created_at":
-                    payload["created_at"],
-                }))
+        rows = [self._sandbox_row(item) for item in items]
         with self.engine.begin() as conn:
             conn.execute(sandbox_runs.insert(), rows)
 
+    def save_sandbox_run(self, item: SandboxRun) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(sandbox_runs.insert().values(**self._sandbox_row(item)))
+
     def save_filter_intercepts(self, items: list[FilterIntercept]) -> None:
-        rows = []
-        for item in items:
-            payload = self._safe_row(item.model_dump(mode="json"))
-            rows.append(
-                self._safe_row({
-                    "intercept_id": payload["intercept_id"],
-                    "task_id": payload["task_id"],
-                    "request_id": payload["request_id"],
-                    "decision": payload["decision"],
-                    "error_kind": payload["error_kind"],
-                    "reason": payload["reason"],
-                    "command_json": json.dumps(payload["command"], ensure_ascii=False, sort_keys=True),
-                    "runtime": payload["runtime"],
-                    "metadata_json": json.dumps(payload["metadata"], ensure_ascii=False, sort_keys=True),
-                    "created_at": payload["created_at"],
-                }))
+        rows = [self._filter_row(item) for item in items]
         if rows:
             with self.engine.begin() as conn:
                 conn.execute(filter_intercepts.insert(), rows)
+
+    def save_filter_decision(self, item: FilterIntercept) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(filter_intercepts.insert().values(**self._filter_row(item)))
 
     def save_telemetry(self, telemetry: TelemetrySummary) -> None:
         payload = self._safe_row(telemetry.model_dump(mode="json"))
@@ -528,7 +605,7 @@ class ReviewStorage:
             conn.execute(reports.insert().values(**row))
 
     def query_task(self, task_id: str) -> dict[str, Any]:
-        task_id = self.boundary.text(task_id).text
+        task_id = self._safe_identity("task_id", task_id)
         result: dict[str, Any] = {}
         with self.engine.connect() as conn:
             for name, table in [

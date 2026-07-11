@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -68,6 +69,8 @@ _PROTECTED_SKILL_DESTINATIONS = (
     ("skills", "code-review", "SKILL.md"),
 )
 _SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_IDENTITY_FALLBACK_MAX_DEPTH = 6
+_IDENTITY_FALLBACK_MAX_ITEMS = 64
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,157 @@ def _is_protected_input_source(value: object) -> bool:
 def _is_protected_skill_destination(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return any(_path_starts_with(parts, prefix) for prefix in _PROTECTED_SKILL_DESTINATIONS)
+
+
+def _identity_type_name(value: object) -> str:
+    return f"{type(value).__module__}.{type(value).__qualname__}"
+
+
+def _identity_digest(value: str | bytes) -> str:
+    encoded = value if isinstance(value, bytes) else value.encode("utf-8", errors="surrogatepass")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_representation_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _bounded_identity_representation(
+    value: object,
+    *,
+    depth: int = 0,
+    active: set[int] | None = None,
+) -> dict[str, object]:
+    """Return a bounded, non-revealing shape for values JSON cannot encode."""
+    value_type = _identity_type_name(value)
+    if value is None:
+        return {"type": value_type, "value": None}
+    if type(value) is bool:
+        return {"type": value_type, "value": value}
+    if type(value) is int:
+        magnitude = abs(value)
+        byte_length = max(1, (magnitude.bit_length() + 7) // 8)
+        encoded = magnitude.to_bytes(byte_length, "big")
+        return {
+            "type": value_type,
+            "sign": -1 if value < 0 else 1,
+            "bits": magnitude.bit_length(),
+            "digest": _identity_digest(encoded),
+        }
+    if type(value) is float:
+        return {"type": value_type, "value": value.hex()}
+    if type(value) is str:
+        return {
+            "type": value_type,
+            "length": len(value),
+            "digest": _identity_digest(value),
+        }
+    if type(value) is bytes:
+        return {
+            "type": value_type,
+            "length": len(value),
+            "digest": _identity_digest(value),
+        }
+
+    container_types = {list, tuple, dict, set, frozenset}
+    if type(value) not in container_types:
+        return {"type": value_type}
+    if depth >= _IDENTITY_FALLBACK_MAX_DEPTH:
+        return {"type": value_type, "length": len(value), "truncated": "depth"}
+
+    active = set() if active is None else active
+    marker = id(value)
+    if marker in active:
+        return {"type": value_type, "length": len(value), "cycle": True}
+    active.add(marker)
+    try:
+        if type(value) is dict:
+            items = [[
+                _bounded_identity_representation(key, depth=depth + 1, active=active),
+                _bounded_identity_representation(item, depth=depth + 1, active=active),
+            ] for key, item in value.items()]
+            items.sort(key=_canonical_representation_json)
+        else:
+            items = [_bounded_identity_representation(item, depth=depth + 1, active=active) for item in value]
+            if type(value) in {set, frozenset}:
+                items.sort(key=_canonical_representation_json)
+        return {
+            "type": value_type,
+            "length": len(value),
+            "items": items[:_IDENTITY_FALLBACK_MAX_ITEMS],
+            "truncated": len(items) > _IDENTITY_FALLBACK_MAX_ITEMS,
+        }
+    finally:
+        active.remove(marker)
+
+
+def _typed_identity_representation(
+    value: object,
+    *,
+    active: set[int] | None = None,
+) -> dict[str, object]:
+    """Represent a built-in value tree without erasing Python node types."""
+    if value is None or type(value) in {bool, int, float, str, bytes}:
+        return _bounded_identity_representation(value)
+
+    value_type = _identity_type_name(value)
+    if type(value) not in {list, tuple, dict, set, frozenset}:
+        raise TypeError(f"unsupported identity component type: {value_type}")
+
+    active = set() if active is None else active
+    marker = id(value)
+    if marker in active:
+        return {"type": value_type, "length": len(value), "cycle": True}
+    active.add(marker)
+    try:
+        if type(value) is dict:
+            items = [[
+                _typed_identity_representation(key, active=active),
+                _typed_identity_representation(item, active=active),
+            ] for key, item in value.items()]
+            items.sort(key=_canonical_representation_json)
+        else:
+            items = [_typed_identity_representation(item, active=active) for item in value]
+            if type(value) in {set, frozenset}:
+                items.sort(key=_canonical_representation_json)
+        return {
+            "type": value_type,
+            "length": len(value),
+            "items": items,
+        }
+    finally:
+        active.remove(marker)
+
+
+def _canonical_identity_component(value: object) -> dict[str, object]:
+    value_type = _identity_type_name(value)
+    if type(value) in {list, tuple, dict, set, frozenset}:
+        try:
+            canonical = _canonical_representation_json(_typed_identity_representation(value))
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            canonical = _canonical_representation_json(_bounded_identity_representation(value))
+        return {
+            "type": value_type,
+            "length": len(value),
+            "digest": _identity_digest(canonical),
+        }
+    if value is None or type(value) in {str, bool, int}:
+        normalized = value
+    elif type(value) is float:
+        normalized = repr(value)
+    elif type(value) is bytes:
+        normalized = value.hex()
+    else:
+        normalized = None
+    return {
+        "type": value_type,
+        "value": normalized,
+    }
 
 
 class ReviewExecutionPolicy:
@@ -261,26 +415,52 @@ class ReviewExecutionPolicy:
             task_id = raw_task_id
             runtime = raw_runtime
             request_id = raw_request_id
+            metadata_request_id = request_id
             command = list(raw_command)
         else:
             task_id = trusted_task_id
             runtime = trusted_runtime
-            request_id = "invalid-request"
+            raw_identity = json.dumps(
+                {
+                    "task_id": _canonical_identity_component(raw_task_id),
+                    "request_id": _canonical_identity_component(raw_request_id),
+                    "runtime": _canonical_identity_component(raw_runtime),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            identity_digest = hashlib.sha256(raw_identity.encode("utf-8")).hexdigest()[:24]
+            request_id = f"invalid-{identity_digest}"
+            metadata_request_id = "invalid-request"
             command = []
-        payload = f"{request_id}:{decision}:{reason}:{' '.join(command)}"
-        intercept_id = "filter_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        error_kind = DECISION_ERROR_KIND[decision]
+        payload = json.dumps(
+            {
+                "task_id": task_id,
+                "request_id": request_id,
+                "decision": decision,
+                "reason": reason,
+                "command": command,
+                "runtime": runtime,
+            },
+            sort_keys=True,
+        )
+        intercept_id = "filter_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
         return PolicyDecision(
             decision=decision,
             intercept=FilterIntercept(
                 intercept_id=intercept_id,
                 task_id=task_id,
+                request_id=request_id,
                 decision=decision,
+                error_kind=error_kind,
                 reason=reason,
                 command=command,
                 runtime=runtime,
                 metadata={
-                    "request_id": request_id,
-                    "error_kind": DECISION_ERROR_KIND[decision],
+                    "request_id": metadata_request_id,
+                    "error_kind": error_kind,
                 },
                 created_at=utc_now(self.dry_run),
             ),

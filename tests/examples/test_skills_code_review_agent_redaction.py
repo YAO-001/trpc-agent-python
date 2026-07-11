@@ -408,7 +408,9 @@ def test_storage_json_columns_preserve_primitives_and_redact_strings(tmp_path):
     intercept = FilterIntercept(
         intercept_id="intercept-storage-json-primitives",
         task_id=task_id,
+        request_id=f"{task_id}:storage-json",
         decision="allow",
+        error_kind="",
         reason="structured metadata is allowed",
         command=["python3", "scripts/run_static_review.py"],
         runtime="container",
