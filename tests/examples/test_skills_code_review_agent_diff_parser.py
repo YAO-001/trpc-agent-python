@@ -107,7 +107,7 @@ def test_parse_git_c_quoted_path_escapes(encoded, expected):
     "header",
     [
         'diff --git "a/pkg/app.py b/pkg/app.py',
-        "diff --git a/pkg/app.py b/pkg/app.py unexpected",
+        "diff --git a/pkg/app.py c/pkg/app.py unexpected",
         'diff --git "a/pkg/app.py""b/pkg/app.py"',
         'diff --git "a/pkg/app.py"b/pkg/app.py',
     ],
@@ -129,6 +129,58 @@ def test_parse_preserves_trailing_space_in_c_quoted_path():
 
     assert parsed.changed_files == ["pkg/name "]
     assert parsed.added_lines[0].file == "pkg/name "
+
+
+def test_parse_unquoted_git_paths_with_spaces():
+    diff = """diff --git a/pkg/path with spaces.py b/pkg/path with spaces.py
+--- a/pkg/path with spaces.py
++++ b/pkg/path with spaces.py
+@@ -0,0 +1 @@
++answer = 42
+"""
+
+    parsed = parse_unified_diff(diff)
+
+    assert parsed.changed_files == ["pkg/path with spaces.py"]
+    assert parsed.added_lines[0].file == "pkg/path with spaces.py"
+
+
+@pytest.mark.parametrize(
+    ("diff", "expected"),
+    [
+        (
+            'diff --git "a/\\346\\226\\207.py" b/new space.py\n'
+            "similarity index 100%\n"
+            'rename from "\\346\\226\\207.py"\n'
+            "rename to new space.py\n",
+            ("文.py", "new space.py"),
+        ),
+        (
+            'diff --git a/old space.py "b/\\346\\226\\260.py"\n'
+            "similarity index 100%\n"
+            "rename from old space.py\n"
+            'rename to "\\346\\226\\260.py"\n',
+            ("old space.py", "新.py"),
+        ),
+        (
+            "diff --git a/old b/one.py b/new b/two.py\n"
+            "similarity index 100%\n"
+            "rename from old b/one.py\n"
+            "rename to new b/two.py\n",
+            ("old b/one.py", "new b/two.py"),
+        ),
+    ],
+)
+def test_parse_ambiguous_and_mixed_git_rename_paths(diff, expected):
+    parsed = parse_unified_diff(diff)
+
+    assert [(item.old_file, item.new_file) for item in parsed.files] == [expected]
+    assert parsed.changed_files == [expected[1]]
+
+
+def test_parse_rejects_unresolved_ambiguous_git_header():
+    with pytest.raises(ValueError, match="ambiguous git diff paths"):
+        parse_unified_diff("diff --git a/old b/one.py b/new b/two.py\n")
 
 
 def test_hunk_content_that_looks_like_file_headers_is_not_reparsed():

@@ -109,12 +109,53 @@ def _decode_git_path(value: str) -> str:
     return bytes(decoded).decode("utf-8")
 
 
+def _split_unquoted_git_paths(value: str) -> tuple[str, str] | None:
+    """Split Git's unquoted ``a/... b/...`` form when paths contain spaces."""
+    if '"' in value or not value.startswith("a/"):
+        return None
+    candidates: list[tuple[str, str]] = []
+    cursor = 0
+    while True:
+        separator = value.find(" b/", cursor)
+        if separator < 0:
+            break
+        old_path = value[:separator]
+        new_path = value[separator + 1:]
+        if old_path.startswith("a/") and new_path.startswith("b/"):
+            candidates.append((old_path, new_path))
+        cursor = separator + 1
+    matching = [item for item in candidates if item[0][2:] == item[1][2:]]
+    if len(matching) == 1:
+        return matching[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        return "", ""
+    return None
+
+
+def _looks_like_unresolved_git_paths(values: list[str]) -> bool:
+    if not values:
+        return False
+    try:
+        decoded = [_decode_git_path(value) for value in values]
+    except (UnicodeError, ValueError):
+        return False
+    return decoded[0].startswith("a/") and any(value.startswith("b/") for value in decoded[1:])
+
+
 def _git_header_paths(raw: str) -> tuple[str, str] | None:
     if not raw.startswith("diff --git "):
         return None
-    values = _split_git_path_tokens(raw[len("diff --git "):])
+    header_value = raw[len("diff --git "):]
+    values = _split_git_path_tokens(header_value)
     if len(values) != 2:
-        raise ValueError(f"invalid git diff header: {raw!r}")
+        unquoted = _split_unquoted_git_paths(header_value)
+        if unquoted is None:
+            if _looks_like_unresolved_git_paths(values):
+                return "", ""
+            raise ValueError(f"invalid git diff header: {raw!r}")
+        values = list(unquoted)
     return (
         _normalize_path(_decode_git_path(values[0])),
         _normalize_path(_decode_git_path(values[1])),
@@ -124,6 +165,10 @@ def _git_header_paths(raw: str) -> tuple[str, str] | None:
 def _file_header_path(raw: str, prefix: str) -> str:
     value = raw[len(prefix):].split("\t", 1)[0]
     return _normalize_path(_decode_git_path(value))
+
+
+def _metadata_path(raw: str, prefix: str) -> str:
+    return _decode_git_path(raw[len(prefix):])
 
 
 def _context(events: list[_LineEvent], idx: int, direction: int, limit: int = 4) -> list[str]:
@@ -142,6 +187,8 @@ def _context(events: list[_LineEvent], idx: int, direction: int, limit: int = 4)
 def _finalize_file(file_change: FileChange | None, events: list[_LineEvent]) -> None:
     if file_change is None:
         return
+    if not file_change.old_file or not file_change.new_file:
+        raise ValueError("ambiguous git diff paths were not resolved by file metadata")
     file_change.added_lines = [
         ChangedLine(
             file=file_change.new_file,
@@ -246,6 +293,23 @@ def parse_unified_diff(diff_text: str) -> ParsedDiff:
 
         if raw.startswith("--- ") or raw.startswith("+++ "):
             raise ValueError(f"orphan unified-diff file header: {raw!r}")
+
+        if current is not None:
+            metadata_fields = (
+                ("rename from ", "old_file"),
+                ("rename to ", "new_file"),
+                ("copy from ", "old_file"),
+                ("copy to ", "new_file"),
+            )
+            matched_metadata = False
+            for prefix, field in metadata_fields:
+                if raw.startswith(prefix):
+                    setattr(current, field, _metadata_path(raw, prefix))
+                    matched_metadata = True
+                    break
+            if matched_metadata:
+                index += 1
+                continue
 
         hunk_match = _HUNK_RE.match(raw)
         if hunk_match:
