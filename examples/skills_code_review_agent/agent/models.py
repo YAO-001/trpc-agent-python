@@ -14,6 +14,7 @@ from datetime import datetime
 from datetime import timezone
 from enum import Enum
 from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel
 from pydantic import Field
@@ -33,9 +34,27 @@ def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", title.strip().lower())
 
 
-def finding_dedupe_key(file: str, line: int, category: str, title: str) -> str:
-    payload = f"{file}:{line}:{category}:{normalize_title(title)}"
+def finding_dedupe_key(file: str, line: int, category: str) -> str:
+    payload = f"{file}:{line}:{category}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+FindingSeverity = Literal["info", "low", "medium", "high", "critical"]
+ReviewCategory = Literal["security", "secret", "async_resource", "database", "test", "sandbox"]
+
+
+def _canonical_sources(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = list(value)
+    else:
+        raise ValueError("source must be a string or a sequence of strings")
+    if not all(isinstance(item, str) for item in values):
+        raise ValueError("source entries must be strings")
+    return sorted({item for item in values if item})
 
 
 class ReviewTaskStatus(str, Enum):
@@ -100,52 +119,42 @@ class ParsedDiff(BaseModel):
 
 
 class Finding(BaseModel):
-    severity: str
-    category: str
+    severity: FindingSeverity
+    category: ReviewCategory
     file: str
-    line: int
+    line: int = Field(ge=0, strict=True)
     title: str
     evidence: str
     recommendation: str
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False, strict=True)
     source: list[str] = Field(default_factory=list)
     dedupe_key: str = ""
 
     @field_validator("source", mode="before")
     @classmethod
     def _coerce_source(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value]
-        return list(value)
+        return _canonical_sources(value)
 
     @model_validator(mode="after")
     def _set_dedupe_key(self) -> "Finding":
-        if not self.dedupe_key:
-            self.dedupe_key = finding_dedupe_key(self.file, self.line, self.category, self.title)
-        self.source = sorted({str(item) for item in self.source if str(item)})
+        self.dedupe_key = finding_dedupe_key(self.file, self.line, self.category)
         return self
 
 
 class ReviewWarning(BaseModel):
-    category: str
+    category: ReviewCategory
     title: str
     message: str
     file: str = ""
-    line: int = 0
-    confidence: float = 0.0
+    line: int = Field(default=0, ge=0, strict=True)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, allow_inf_nan=False, strict=True)
     source: list[str] = Field(default_factory=list)
     needs_human_review: bool = False
 
     @field_validator("source", mode="before")
     @classmethod
     def _coerce_source(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value]
-        return list(value)
+        return _canonical_sources(value)
 
 
 class FilterIntercept(BaseModel):

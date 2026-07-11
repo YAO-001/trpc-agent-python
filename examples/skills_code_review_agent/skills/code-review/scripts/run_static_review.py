@@ -370,7 +370,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                 _finding(
                     line,
                     severity="medium",
-                    category="resource",
+                    category="async_resource",
                     title="file handle may not be closed",
                     recommendation="Use with open(...) as f or close the file in a finally block.",
                     confidence=0.80,

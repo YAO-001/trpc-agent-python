@@ -21,6 +21,7 @@ from agent.agent_factory import prepare_execution_plan
 from agent.execution_request import ExecutionRequest
 from agent.filter_policy import ReviewExecutionPolicy
 from agent.input_resolver import EXAMPLE_DIR
+from agent.models import Finding
 from agent.models import SandboxRun
 from agent.orchestrator import ReviewOrchestrator
 from agent.sandbox_artifact_loader import load_sandbox_artifacts
@@ -630,7 +631,7 @@ def test_skill_static_review_emits_real_security_finding(tmp_path):
                          })  # noqa: E126
 
 
-def test_skill_static_review_emits_database_or_resource_finding(tmp_path):
+def test_skill_static_review_emits_database_or_async_resource_finding(tmp_path):
     report = ReviewOrchestrator(db_url=f"sqlite:///{tmp_path / 'review.db'}", output_dir=tmp_path / "out").review(
         fixture="async_resource_leak",
         dry_run=True,
@@ -640,7 +641,29 @@ def test_skill_static_review_emits_database_or_resource_finding(tmp_path):
     skill_findings = [finding for finding in report.findings if "skill:run_static_review" in finding.source]
 
     assert skill_findings
-    assert any(finding.category in {"database", "resource", "async_resource"} for finding in skill_findings)
+    assert any(finding.category in {"database", "async_resource"} for finding in skill_findings)
+
+
+def test_static_review_file_handle_uses_canonical_category(tmp_path):
+    output = _run_static_review_script(
+        tmp_path,
+        {
+            "task_id":
+            "task-category",
+            "changed_files": ["src/files.py"],
+            "added_lines": [{
+                "file": "src/files.py",
+                "line": 8,
+                "content": "handle = open(user_path)",
+                "context_before": [],
+                "context_after": [],
+            }],
+        },
+    )
+    item = next(finding for finding in output["findings"] if finding["title"] == "file handle may not be closed")
+
+    assert item["category"] == "async_resource"
+    assert Finding.model_validate(item).category == "async_resource"
 
 
 def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
@@ -713,7 +736,7 @@ def test_skill_static_review_safe_patterns_do_not_false_positive(tmp_path):
 
     finding_keys = {(item["category"], item["title"]) for item in output["findings"]}
     assert ("security", "subprocess invoked with shell=True") not in finding_keys
-    assert ("resource", "file handle may not be closed") not in finding_keys
+    assert ("async_resource", "file handle may not be closed") not in finding_keys
     assert ("database", "database connection/session may not be closed") not in finding_keys
     assert not any(item["severity"] == "high" for item in output["findings"])
 
@@ -779,6 +802,69 @@ def test_sandbox_artifact_invalid_schema_becomes_human_review_warning():
     assert len(artifacts.needs_human_review) >= 3
     assert all("AKIAIOSFODNN7EXAMPLE" not in warning.message for warning in artifacts.needs_human_review)
     assert any("sandbox:run_static_review" in warning.source for warning in artifacts.needs_human_review)
+
+
+def test_legacy_resource_artifact_is_canonicalized_without_crashing():
+    finding = {
+        "severity": "medium",
+        "category": "resource",
+        "file": "app.py",
+        "line": 7,
+        "title": "legacy resource finding",
+        "evidence": "open(path)",
+        "recommendation": "use a context manager",
+        "confidence": 0.8,
+    }
+    warning = {
+        "category": "resource",
+        "title": "legacy resource warning",
+        "message": "review lifecycle",
+        "confidence": 0.6,
+    }
+    run = SandboxRun(
+        run_id="sandbox_legacy_resource",
+        task_id="task-artifact",
+        request_id="task-artifact:legacy-resource",
+        runtime="local",
+        command=["python3", "scripts/run_static_review.py"],
+        output_files={"out/findings.json": json.dumps({
+            "findings": [finding],
+            "warnings": [warning],
+        })},
+    )
+
+    artifacts = load_sandbox_artifacts([run])
+
+    assert [item.category for item in artifacts.findings] == ["async_resource"]
+    assert [item.category for item in artifacts.warnings] == ["async_resource"]
+
+
+def test_malformed_sandbox_warning_becomes_audit_warning_without_crashing():
+    run = SandboxRun(
+        run_id="sandbox_bad_warning",
+        task_id="task-artifact",
+        request_id="task-artifact:bad-warning",
+        runtime="local",
+        command=["python3", "scripts/run_static_review.py"],
+        output_files={
+            "out/findings.json":
+            json.dumps({
+                "warnings": [{
+                    "category": "not-a-category",
+                    "title": "bad warning",
+                    "message": "bad",
+                    "source": 42,
+                }]
+            })
+        },
+    )
+
+    artifacts = load_sandbox_artifacts([run])
+
+    assert artifacts.warnings == []
+    assert len(artifacts.needs_human_review) == 1
+    assert artifacts.needs_human_review[0].category == "sandbox"
+    assert artifacts.needs_human_review[0].title == "sandbox warning has invalid schema"
 
 
 def test_e2e_all_8_fixtures_and_secret_redaction(tmp_path):

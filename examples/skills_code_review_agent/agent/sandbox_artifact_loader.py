@@ -23,7 +23,7 @@ _ARTIFACT_SKILL_SOURCES = {
     "out/smoke.json": ("skill:smoke_test", "sandbox:smoke_test"),
 }
 _VALID_SEVERITIES = {"info", "low", "medium", "high", "critical"}
-_VALID_CATEGORIES = {"security", "secret", "async_resource", "resource", "database", "test", "sandbox"}
+_VALID_CATEGORIES = {"security", "secret", "async_resource", "database", "test", "sandbox"}
 _REQUIRED_FINDING_FIELDS = {
     "severity",
     "category",
@@ -59,8 +59,10 @@ def _coerce_sources(value: Any, required_sources: tuple[str, ...]) -> list[str]:
         sources: list[str] = []
     elif isinstance(value, str):
         sources = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        sources = list(value)
     else:
-        sources = [str(item) for item in value if str(item)]
+        raise ValueError("sandbox artifact source must be a string or list of strings")
     sources.extend(required_sources)
     return sorted(set(sources))
 
@@ -75,7 +77,7 @@ def _redact(value: Any, redactor: SecretRedactor | None) -> str:
 def _coerce_line(value: Any) -> int | None:
     try:
         line = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if line < 0:
         return None
@@ -85,11 +87,16 @@ def _coerce_line(value: Any) -> int | None:
 def _coerce_confidence(value: Any, default: float = 1.0) -> float:
     try:
         confidence = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if confidence < 0.0 or confidence > 1.0:
         return default
     return confidence
+
+
+def _canonical_category(value: Any, default: str = "sandbox") -> str:
+    category = str(value or default).lower()
+    return "async_resource" if category == "resource" else category
 
 
 def _artifact_warning(
@@ -110,6 +117,21 @@ def _artifact_warning(
     )
 
 
+def _invalid_payload_warning(
+    *,
+    kind: str,
+    path: str,
+    sources: tuple[str, ...],
+    redactor: SecretRedactor | None,
+) -> ReviewWarning:
+    return _artifact_warning(
+        title=f"sandbox {kind} has invalid schema",
+        message=f"{path}: sandbox {kind} could not be validated.",
+        sources=sources,
+        redactor=redactor,
+    )
+
+
 def _warning_from_payload(
     payload: dict[str, Any],
     *,
@@ -119,7 +141,7 @@ def _warning_from_payload(
 ) -> ReviewWarning:
     line = _coerce_line(payload.get("line")) or 0
     return ReviewWarning(
-        category=str(payload.get("category") or "sandbox"),
+        category=_canonical_category(payload.get("category")),
         title=_redact(payload.get("title") or "sandbox artifact warning", redactor),
         message=_redact(payload.get("message") or payload.get("evidence") or "", redactor),
         file=_redact(payload.get("file") or "", redactor),
@@ -137,7 +159,7 @@ def _validate_finding(payload: dict[str, Any]) -> str:
     severity = str(payload.get("severity") or "").lower()
     if severity not in _VALID_SEVERITIES:
         return f"sandbox finding has invalid severity {payload.get('severity')!r}"
-    category = str(payload.get("category") or "").lower()
+    category = _canonical_category(payload.get("category"), "")
     if category not in _VALID_CATEGORIES:
         return f"sandbox finding has invalid category {payload.get('category')!r}"
     if _coerce_line(payload.get("line")) is None:
@@ -156,7 +178,7 @@ def _finding_from_payload(
 ) -> Finding:
     return Finding(
         severity=str(payload.get("severity") or "low").lower(),
-        category=str(payload.get("category") or "sandbox").lower(),
+        category=_canonical_category(payload.get("category")),
         file=_redact(payload.get("file") or "", redactor),
         line=_coerce_line(payload.get("line")) or 0,
         title=_redact(payload.get("title") or "sandbox artifact finding", redactor),
@@ -212,7 +234,10 @@ class SandboxArtifactLoader:
                         ))
                     continue
                 for item in _iter_payload_items(data, "findings"):
-                    reason = _validate_finding(item)
+                    try:
+                        reason = _validate_finding(item)
+                    except (TypeError, ValueError, OverflowError):
+                        reason = "sandbox finding could not be validated"
                     if reason:
                         needs_human_review.append(
                             _artifact_warning(
@@ -222,15 +247,33 @@ class SandboxArtifactLoader:
                                 redactor=self.redactor,
                             ))
                         continue
-                    findings.append(_finding_from_payload(item, sources=sources, redactor=self.redactor))
+                    try:
+                        findings.append(_finding_from_payload(item, sources=sources, redactor=self.redactor))
+                    except (TypeError, ValueError, OverflowError):
+                        needs_human_review.append(
+                            _invalid_payload_warning(
+                                kind="finding",
+                                path=path,
+                                sources=sources,
+                                redactor=self.redactor,
+                            ))
                 for item in _iter_payload_items(data, "warnings"):
-                    warnings.append(
-                        _warning_from_payload(
-                            item,
-                            sources=sources,
-                            needs_human_review=False,
-                            redactor=self.redactor,
-                        ))
+                    try:
+                        warnings.append(
+                            _warning_from_payload(
+                                item,
+                                sources=sources,
+                                needs_human_review=False,
+                                redactor=self.redactor,
+                            ))
+                    except (TypeError, ValueError, OverflowError):
+                        needs_human_review.append(
+                            _invalid_payload_warning(
+                                kind="warning",
+                                path=path,
+                                sources=sources,
+                                redactor=self.redactor,
+                            ))
                 needs_value = data.get("needs_human_review")
                 if isinstance(needs_value, bool) and needs_value:
                     needs_human_review.append(
@@ -241,13 +284,22 @@ class SandboxArtifactLoader:
                             redactor=self.redactor,
                         ))
                 for item in _iter_payload_items(data, "needs_human_review"):
-                    needs_human_review.append(
-                        _warning_from_payload(
-                            item,
-                            sources=sources,
-                            needs_human_review=True,
-                            redactor=self.redactor,
-                        ))
+                    try:
+                        needs_human_review.append(
+                            _warning_from_payload(
+                                item,
+                                sources=sources,
+                                needs_human_review=True,
+                                redactor=self.redactor,
+                            ))
+                    except (TypeError, ValueError, OverflowError):
+                        needs_human_review.append(
+                            _invalid_payload_warning(
+                                kind="warning",
+                                path=path,
+                                sources=sources,
+                                redactor=self.redactor,
+                            ))
 
         return SandboxArtifacts(findings=findings, warnings=warnings, needs_human_review=needs_human_review)
 

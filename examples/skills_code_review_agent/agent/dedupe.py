@@ -19,26 +19,33 @@ def severity_rank(severity: str) -> int:
 
 
 def dedupe_findings(findings: list[Finding]) -> list[Finding]:
-    grouped: dict[tuple[str, int, str], Finding] = {}
-    merged_sources: dict[tuple[str, int, str], set[str]] = {}
+    grouped: dict[tuple[str, int, str], list[Finding]] = {}
     for finding in findings:
         key = (finding.file, finding.line, finding.category)
-        merged_sources.setdefault(key, set()).update(finding.source)
-        current = grouped.get(key)
-        if current is None:
-            grouped[key] = finding
-            continue
-        if (
-                severity_rank(finding.severity),
-                finding.confidence,
-        ) > (severity_rank(current.severity), current.confidence):
-            grouped[key] = finding
+        grouped.setdefault(key, []).append(finding)
+
+    merged: list[Finding] = []
+    for values in grouped.values():
+        representative = max(
+            values,
+            key=lambda item: (
+                item.confidence,
+                severity_rank(item.severity),
+                item.title,
+                item.evidence,
+                item.recommendation,
+                tuple(item.source),
+            ),
+        )
+        severity = max(values, key=lambda item: severity_rank(item.severity)).severity
+        confidence = max(item.confidence for item in values)
+        sources = sorted({source for item in values for source in item.source})
+        payload = representative.model_dump(mode="json")
+        payload.update({"severity": severity, "confidence": confidence, "source": sources})
+        merged.append(Finding.model_validate(payload))
     return sorted(
-        [
-            finding.model_copy(update={"source": sorted(merged_sources.get(key, set()))})
-            for key, finding in grouped.items()
-        ],
-        key=lambda item: (item.file, item.line, item.category, item.title),
+        merged,
+        key=lambda item: (item.file, item.line, item.category, item.title, item.evidence, item.recommendation),
     )
 
 
@@ -47,8 +54,7 @@ def _warning_message_prefix(message: str) -> str:
 
 
 def dedupe_warnings(warnings: list[ReviewWarning]) -> list[ReviewWarning]:
-    grouped: dict[tuple[str, str, int, str, str], ReviewWarning] = {}
-    merged_sources: dict[tuple[str, str, int, str, str], set[str]] = {}
+    grouped: dict[tuple[str, str, int, str, str], list[ReviewWarning]] = {}
     for warning in warnings:
         key = (
             warning.category,
@@ -57,19 +63,32 @@ def dedupe_warnings(warnings: list[ReviewWarning]) -> list[ReviewWarning]:
             normalize_title(warning.title),
             _warning_message_prefix(warning.message),
         )
-        merged_sources.setdefault(key, set()).update(warning.source)
-        current = grouped.get(key)
-        if current is None:
-            grouped[key] = warning
-            continue
-        if warning.confidence > current.confidence:
-            grouped[key] = warning
-        if warning.needs_human_review and not grouped[key].needs_human_review:
-            grouped[key] = grouped[key].model_copy(update={"needs_human_review": True})
+        grouped.setdefault(key, []).append(warning)
+
+    merged: list[ReviewWarning] = []
+    for values in grouped.values():
+        representative = max(
+            values,
+            key=lambda item: (
+                item.confidence,
+                item.title,
+                item.message,
+                item.file,
+                item.line,
+                item.category,
+                tuple(item.source),
+            ),
+        )
+        payload = representative.model_dump(mode="json")
+        payload.update({
+            "confidence": max(item.confidence for item in values),
+            "source": sorted({source
+                              for item in values
+                              for source in item.source}),
+            "needs_human_review": any(item.needs_human_review for item in values),
+        })
+        merged.append(ReviewWarning.model_validate(payload))
     return sorted(
-        [
-            warning.model_copy(update={"source": sorted(merged_sources.get(key, set()))})
-            for key, warning in grouped.items()
-        ],
+        merged,
         key=lambda item: (item.file, item.line, item.category, item.title, item.message),
     )
