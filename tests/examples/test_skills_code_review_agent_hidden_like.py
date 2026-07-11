@@ -13,10 +13,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from agent.diff_parser import parse_unified_diff
 from agent.input_resolver import EXAMPLE_DIR
+from agent.redaction_boundary import RedactionBoundary
 from agent.rule_engine import RuleEngine
-from agent.secret_redactor import SecretRedactor
 
 SCRIPT = EXAMPLE_DIR / "skills" / "code-review" / "scripts" / "run_static_review.py"
 
@@ -36,6 +38,17 @@ def _payload(changed_files: list[str], added_lines: list[dict[str, Any]]) -> dic
         "changed_files": changed_files,
         "added_lines": added_lines,
     }
+
+
+def _redacted_secret_payload(raw: str) -> tuple[dict[str, Any], RedactionBoundary]:
+    boundary = RedactionBoundary()
+    content = boundary.text(f'api_key = "{raw}"').text
+    payload = _payload(
+        ["src/app/settings.py", "tests/test_settings.py"],
+        [_line("src/app/settings.py", 12, content)],
+    )
+    payload["redaction_summary"] = boundary.summary.model_dump(mode="json")
+    return payload, boundary
 
 
 def _run_static_review(tmp_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -181,16 +194,110 @@ def test_hidden_like_safe_cases_do_not_emit_high_or_critical_findings(tmp_path):
 
 
 def test_hidden_like_low_confidence_secret_routes_to_warning_not_high(tmp_path):
-    output = _run_static_review(
-        tmp_path,
-        _payload(
-            ["src/app/settings.py", "tests/test_settings.py"],
-            [_line("src/app/settings.py", 12, 'api_key = "sk-test-local-placeholder"')],
-        ),
-    )
+    raw = "dummy-secret-for-tests"
+    payload, _ = _redacted_secret_payload(raw)
+    output = _run_static_review(tmp_path, payload)
 
     assert _high_findings(output) == []
-    assert any(item["category"] == "secret" for item in [*output["warnings"], *output["needs_human_review"]])
+    warning = next(item for item in [*output["warnings"], *output["needs_human_review"]]
+                   if item["category"] == "secret")
+    assert warning["confidence"] == 0.58
+    assert raw not in json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    assert raw not in json.dumps(output, ensure_ascii=False, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_confidence", "expected_bucket"),
+    (
+        ("dummy-secret-for-tests", 0.58, "warning"),
+        ("production-secret-value-987", 0.99, "finding"),
+        ("realtestcredential123", 0.99, "finding"),
+        ("latest-production-secret-987", 0.99, "finding"),
+    ),
+)
+def test_hidden_like_host_and_sandbox_secret_confidence_match(
+    tmp_path,
+    raw: str,
+    expected_confidence: float,
+    expected_bucket: str,
+):
+    payload, boundary = _redacted_secret_payload(raw)
+    content = payload["added_lines"][0]["content"]
+    diff = f"""diff --git a/src/app/settings.py b/src/app/settings.py
+index 1111111..2222222 100644
+--- a/src/app/settings.py
++++ b/src/app/settings.py
+@@ -1 +1,2 @@
++{content}
+"""
+    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
+    sandbox = _run_static_review(tmp_path / expected_bucket, payload)
+
+    host_items = [*host.findings, *host.warnings, *host.needs_human_review]
+    sandbox_items = [*sandbox["findings"], *sandbox["warnings"], *sandbox["needs_human_review"]]
+    host_secret = next(item for item in host_items if item.category == "secret")
+    sandbox_secret = next(item for item in sandbox_items if item["category"] == "secret")
+    assert host_secret.confidence == sandbox_secret["confidence"] == expected_confidence
+    assert bool(host.findings) is (expected_bucket == "finding")
+    assert bool(sandbox["findings"]) is (expected_bucket == "finding")
+    assert raw not in json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    assert raw not in json.dumps(sandbox, ensure_ascii=False, sort_keys=True)
+
+
+def test_hidden_like_real_secret_cannot_be_downgraded_by_leading_dummy(tmp_path):
+    dummy = "dummy-secret-for-tests"
+    real = "production-secret-value-987"
+    boundary = RedactionBoundary()
+    content = boundary.text(f'api_key="{dummy}"; password="{real}"').text
+    payload = _payload(
+        ["src/app/settings.py", "tests/test_settings.py"],
+        [_line("src/app/settings.py", 12, content)],
+    )
+    payload["redaction_summary"] = boundary.summary.model_dump(mode="json")
+    diff = f"""diff --git a/src/app/settings.py b/src/app/settings.py
+index 1111111..2222222 100644
+--- a/src/app/settings.py
++++ b/src/app/settings.py
+@@ -1 +1,2 @@
++{content}
+"""
+
+    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
+    sandbox = _run_static_review(tmp_path, payload)
+
+    host_secret = next(item for item in host.findings if item.category == "secret")
+    sandbox_secret = next(item for item in sandbox["findings"] if item["category"] == "secret")
+    assert host_secret.confidence == sandbox_secret["confidence"] == 0.99
+    assert dummy not in json.dumps(sandbox, ensure_ascii=False, sort_keys=True)
+    assert real not in json.dumps(sandbox, ensure_ascii=False, sort_keys=True)
+
+
+def test_hidden_like_hash_prefix_collision_defaults_to_high_confidence(tmp_path):
+    dummy = "dummy-105690"
+    real = "production-104491"
+    boundary = RedactionBoundary()
+    dummy_placeholder = boundary.text(f'api_key="{dummy}"').text
+    real_placeholder = boundary.text(f'password="{real}"').text
+    content = f"{dummy_placeholder}; {real_placeholder}"
+    payload = _payload(
+        ["src/app/settings.py", "tests/test_settings.py"],
+        [_line("src/app/settings.py", 12, content)],
+    )
+    payload["redaction_summary"] = boundary.summary.model_dump(mode="json")
+    diff = f"""diff --git a/src/app/settings.py b/src/app/settings.py
+index 1111111..2222222 100644
+--- a/src/app/settings.py
++++ b/src/app/settings.py
+@@ -1 +1,2 @@
++{content}
+"""
+
+    host = RuleEngine().run(parse_unified_diff(diff), boundary.summary)
+    sandbox = _run_static_review(tmp_path, payload)
+
+    host_secret = next(item for item in host.findings if item.category == "secret")
+    sandbox_secret = next(item for item in sandbox["findings"] if item["category"] == "secret")
+    assert host_secret.confidence == sandbox_secret["confidence"] == 0.99
 
 
 def test_hidden_like_only_test_changes_do_not_warn_missing_tests(tmp_path):
@@ -214,11 +321,14 @@ index 1111111..2222222 100644
 +api_key = "dummy-secret-for-tests"
 +password = "changeme"
 """
-    redacted = SecretRedactor().redact_text(diff)
-    result = RuleEngine().run(parse_unified_diff(redacted.text))
+    boundary = RedactionBoundary()
+    redacted = boundary.text(diff)
+    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
 
     assert not any(finding.category == "secret" and finding.severity in {"critical", "high"}
                    for finding in result.findings)
+    assert "dummy-secret-for-tests" not in redacted.text
+    assert "changeme" not in redacted.text
 
 
 def test_hidden_like_precision_recall(tmp_path):

@@ -186,6 +186,7 @@ class RedactionEvent(BaseModel):
     sha256: str
     placeholder: str
     count: int = 1
+    likely_placeholder: bool = False
 
 
 class RedactionSummary(BaseModel):

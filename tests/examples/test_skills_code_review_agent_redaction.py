@@ -1,0 +1,361 @@
+# Tencent is pleased to support the open source community by making tRPC-Agent-Python available.
+#
+# Copyright (C) 2026 Tencent. All rights reserved.
+#
+# tRPC-Agent-Python is licensed under Apache-2.0.
+"""Redaction-boundary regression tests for the code-review example."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+import agent.sandbox_runner as sandbox_module
+from agent.input_resolver import EXAMPLE_DIR
+from agent.models import RedactionEvent
+from agent.models import RedactionSummary
+from agent.orchestrator import ReviewOrchestrator
+from agent.redaction_boundary import RedactionBoundary
+from agent.sandbox_runner import HarnessExecutionResult
+from agent.secret_redactor import RedactionResult
+from agent.secret_redactor import SecretRedactor
+
+
+@pytest.mark.parametrize(
+    ("raw", "forbidden"),
+    (
+        ('password = "strong passphrase 987"', ("strong passphrase 987", )),
+        ('passwd="passwd-value-987"', ("passwd-value-987", )),
+        ('pwd: "pwd-value-987"', ("pwd-value-987", )),
+        ('client_secret: "opaque-client-secret-123"', ("opaque-client-secret-123", )),
+        ('apiKey = "camel-case-key-123456"', ("camel-case-key-123456", )),
+        ('access_token="access-token-123456"', ("access-token-123456", )),
+        ('refresh-token: "refresh-token-123456"', ("refresh-token-123456", )),
+        ('Authorization: Bearer bearer-token-123456789', ("bearer-token-123456789", )),
+        ('postgresql://alice:plain-password@db/reviews', ("alice", "plain-password")),
+        ('{"password": "json-password-123"}', ("json-password-123", )),
+        ('api_key = "dummy-secret-for-tests"', ("dummy-secret-for-tests", )),
+    ),
+)
+def test_boundary_redacts_every_supported_secret_format(raw: str, forbidden: tuple[str, ...]):
+    boundary = RedactionBoundary()
+
+    safe = boundary.text(raw)
+
+    assert raw != safe.text
+    assert boundary.summary.total_redactions >= 1
+    for value in forbidden:
+        assert value not in safe.text
+
+
+def test_dummy_secret_is_redacted_and_marked_likely_placeholder():
+    raw = "dummy-secret-for-tests"
+    boundary = RedactionBoundary()
+
+    safe = boundary.text(f'api_key = "{raw}"')
+
+    assert raw not in safe.text
+    assert boundary.summary.events
+    assert all(event.likely_placeholder for event in boundary.summary.events)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        'password="abc,def;ghi}"',
+        'password="abc\\\"def,ghi"',
+        "password='abc,def;ghi}'",
+    ),
+)
+def test_quoted_assignments_redact_punctuation_and_escaped_quotes(raw: str):
+    boundary = RedactionBoundary()
+
+    result = boundary.text(raw)
+
+    assert "abc" not in result.text
+    assert "def" not in result.text
+    assert boundary.summary.total_redactions == 1
+
+
+def test_fake_unclosed_placeholder_does_not_disable_later_redaction():
+    raw = "production-secret-value-987"
+    boundary = RedactionBoundary()
+
+    result = boundary.text(f'print("[REDACTED:")\npassword="{raw}"')
+
+    assert raw not in result.text
+    assert boundary.summary.total_redactions == 1
+
+
+@pytest.mark.parametrize(
+    "malicious",
+    (
+        '[REDACTED:SECRET:password="production-secret-value-987":deadbeef]',
+        "[REDACTED:SECRET:production-secret-value-987:deadbeef]",
+    ),
+)
+def test_unrecognized_placeholder_types_cannot_hide_plaintext(malicious: str):
+    boundary = RedactionBoundary()
+
+    result = boundary.text(malicious)
+
+    assert "production-secret-value-987" not in result.text
+    assert boundary.summary.total_redactions >= 1
+
+
+def test_malformed_placeholder_with_delimiters_is_cleaned_as_a_whole():
+    raw = "production-secret-value-987"
+    malicious = f"[REDACTED:SECRET:x,{raw}:deadbeef]"
+
+    result = RedactionBoundary().text(malicious)
+
+    assert raw not in result.text
+    assert result.text.count("[REDACTED:SECRET:") == 1
+
+
+def test_unclosed_malformed_placeholder_is_cleaned_through_end_of_string():
+    raw = "production-secret-value-987"
+    malicious = f"[REDACTED:SECRET:x,{raw}"
+
+    result = RedactionBoundary().text(malicious)
+
+    assert raw not in result.text
+    assert result.text.count("[REDACTED:SECRET:") == 1
+
+
+def test_generated_placeholder_is_idempotent():
+    placeholder = SecretRedactor.placeholder("generic_assignment", "production-secret-value-987")
+
+    result = SecretRedactor().redact_text(placeholder)
+
+    assert result.text == placeholder
+    assert result.summary.total_redactions == 0
+
+
+def test_unquoted_code_expression_is_not_rewritten_as_a_secret():
+    source = 'token = os.getenv("TOKEN")'
+    boundary = RedactionBoundary()
+
+    result = boundary.text(source)
+
+    assert result.text == source
+    assert boundary.summary.total_redactions == 0
+
+
+@pytest.mark.parametrize("spacing", (" ", "\t", " \t "))
+def test_unquoted_code_expression_with_spacing_is_not_rewritten(spacing: str):
+    source = f'token = os.getenv{spacing}("TOKEN")'
+
+    result = RedactionBoundary().text(source)
+
+    assert result.text == source
+    assert result.summary.total_redactions == 0
+
+
+@pytest.mark.parametrize("prefix", ("b", "r", "u", "br", "rb", "B", "RF"))
+def test_prefixed_string_literals_are_redacted(prefix: str):
+    raw = "production-secret-value-987"
+
+    result = RedactionBoundary().text(f'password = {prefix}"{raw}"')
+
+    assert raw not in result.text
+    assert result.summary.total_redactions == 1
+
+
+@pytest.mark.parametrize("quote", ('"""', "'''"))
+def test_triple_quoted_string_literals_are_redacted(quote: str):
+    raw = "production,secret;value}987"
+
+    result = RedactionBoundary().text(f"password = r{quote}{raw}{quote}")
+
+    assert raw not in result.text
+    assert result.summary.total_redactions == 1
+
+
+@pytest.mark.parametrize("raw", ("realtestcredential123", "latest-production-secret-987"))
+def test_test_substrings_do_not_mark_real_credentials_as_placeholders(raw: str):
+    boundary = RedactionBoundary()
+
+    boundary.text(f'password="{raw}"')
+
+    assert boundary.summary.events[0].likely_placeholder is False
+
+
+def test_boundary_accumulates_events_across_text_calls():
+    boundary = RedactionBoundary()
+
+    boundary.text('password="first-real-password"')
+    boundary.text('client_secret="second-real-secret"')
+
+    assert boundary.summary.total_redactions == 2
+
+
+class _SequenceRedactor:
+
+    def __init__(self) -> None:
+        self._flags = iter((True, False))
+
+    def redact_text(self, text: str) -> RedactionResult:
+        likely_placeholder = next(self._flags)
+        placeholder = "[REDACTED:SECRET:generic_assignment:01234567]"
+        return RedactionResult(
+            text=placeholder,
+            summary=RedactionSummary(
+                total_redactions=1,
+                by_type={"generic_assignment": 1},
+                events=[
+                    RedactionEvent(
+                        secret_type="generic_assignment",
+                        sha256="0123456789abcdef",
+                        placeholder=placeholder,
+                        count=1,
+                        likely_placeholder=likely_placeholder,
+                    )
+                ],
+            ),
+        )
+
+
+def test_boundary_merges_placeholder_metadata_with_logical_and():
+    boundary = RedactionBoundary(redactor=_SequenceRedactor())
+
+    boundary.text("placeholder occurrence")
+    boundary.text("real occurrence")
+
+    assert boundary.summary.total_redactions == 2
+    assert boundary.summary.events[0].count == 2
+    assert boundary.summary.events[0].likely_placeholder is False
+
+
+def test_boundary_summary_is_an_isolated_snapshot():
+    boundary = RedactionBoundary()
+    boundary.text('password="real-password-value"')
+
+    exposed = boundary.summary
+    exposed.events[0].count = 99
+    exposed.by_type["generic_assignment"] = 99
+
+    assert boundary.summary.total_redactions == 1
+    assert boundary.summary.events[0].count == 1
+    assert boundary.summary.by_type["generic_assignment"] == 1
+
+
+def test_boundary_clean_recurses_keys_values_lists_and_tuples_without_leaks():
+    secrets = {
+        "key": "key-secret-value",
+        "token": "nested-token-value",
+        "list": "list-password-value",
+        "tuple": "tuple-password-value",
+    }
+    boundary = RedactionBoundary()
+    value = {
+        f'password="{secrets["key"]}"': {
+            "ToKeN": [secrets["token"], {
+                "password": (secrets["list"], secrets["tuple"])
+            }]
+        },
+        "safe": [0, False, None, "public"],
+    }
+
+    cleaned = boundary.clean(value)
+    serialized = json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
+
+    assert isinstance(cleaned, dict)
+    assert isinstance(next(iter(cleaned.values()))["ToKeN"], list)
+    assert isinstance(next(iter(cleaned.values()))["ToKeN"][1]["password"], list)
+    assert cleaned["safe"] == [0, False, None, "public"]
+    assert all(raw not in serialized for raw in secrets.values())
+
+
+def test_boundary_clean_converts_unknown_objects_to_safe_json_strings():
+    raw = "opaque-path-secret-987"
+    boundary = RedactionBoundary()
+
+    cleaned = boundary.clean({"path": Path(f"token={raw}")})
+    serialized = json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
+
+    assert isinstance(cleaned["path"], str)
+    assert raw not in serialized
+
+
+def test_display_db_url_never_exposes_credentials_or_query_secrets():
+    boundary = RedactionBoundary()
+    raw = "postgresql://alice:plain-password@db.example:5432/reviews?token=query-secret"
+
+    displayed = boundary.display_db_url(raw)
+
+    assert displayed == "postgresql://db.example:5432/reviews"
+    assert "alice" not in displayed
+    assert "plain-password" not in displayed
+    assert "query-secret" not in displayed
+
+
+def test_orchestrator_sanitizes_complete_payload_before_sandbox(tmp_path, monkeypatch):
+    raw = "opaque-input-token-987"
+    diff_path = tmp_path / f"token={raw}.diff"
+    diff_path.write_text(
+        """diff --git a/src/config.py b/src/config.py
+index 1111111..2222222 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -1 +1,2 @@
++client_secret = "opaque-input-token-987"
++print("safe context")
+""",
+        encoding="utf-8",
+    )
+    file_list = tmp_path / "files.txt"
+    file_list.write_text(f"src/token={raw}.py\n", encoding="utf-8")
+    captures: list[dict] = []
+    owned_paths: list[Path] = []
+
+    class CapturingHarness:
+
+        def __init__(self, *, runtime, policy, redactor):
+            self.runtime = runtime
+
+        def execute_one(self, *, task_id, review_input, request, policy_context, dry_run):
+            source = request.inputs[0].src
+            owned_path = Path(source.removeprefix("host://"))
+            assert owned_path.is_file()
+            assert policy_context.allowed_input_sources == frozenset({source})
+            captures.append(json.loads(json.dumps(review_input, ensure_ascii=False)))
+            captures[-1]["owned_input"] = json.loads(owned_path.read_text(encoding="utf-8"))
+            owned_paths.append(owned_path)
+            return HarnessExecutionResult(runs=[])
+
+    monkeypatch.setattr(sandbox_module, "TrpcSkillToolSetHarness", CapturingHarness)
+    report = ReviewOrchestrator(
+        example_dir=EXAMPLE_DIR,
+        db_url=f"sqlite:///{tmp_path / 'review.db'}",
+        output_dir=tmp_path / "out",
+    ).review(
+        diff_file=str(diff_path),
+        file_list=str(file_list),
+        dry_run=True,
+        runtime="container",
+    )
+
+    assert len(captures) == 3
+    for payload in captures:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        assert raw not in serialized
+        assert {
+            "task_id",
+            "input_type",
+            "input_ref",
+            "fixture_names",
+            "file_list",
+            "changed_files",
+            "added_lines",
+            "redaction_summary",
+            "rule_warnings",
+            "rule_needs_human_review",
+        }.issubset(payload)
+        assert all("content" in line and "context_before" in line and "context_after" in line
+                   for line in payload["added_lines"])
+        assert payload["owned_input"] == {key: value for key, value in payload.items() if key != "owned_input"}
+    assert raw not in json.dumps(report.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    assert owned_paths and all(not path.exists() for path in owned_paths)

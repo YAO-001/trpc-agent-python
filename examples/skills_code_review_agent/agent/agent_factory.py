@@ -23,40 +23,10 @@ from .execution_request import ExecutionRequest
 from .execution_request import PolicyContext
 from .filter_policy import PolicyDecision
 from .filter_policy import ReviewExecutionPolicy
+from .redaction_boundary import RedactionBoundary
 from .secret_redactor import SecretRedactor
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
-_SENSITIVE_INPUT_FIELDS = frozenset({"password", "token", "api_key", "secret"})
-
-
-def _redact_json_value(
-    value: Any,
-    *,
-    redactor: SecretRedactor,
-    field_name: str | None = None,
-) -> Any:
-    if isinstance(value, str):
-        safe_value = redactor.redact_text(value).text
-        if field_name is not None and field_name.casefold() in _SENSITIVE_INPUT_FIELDS:
-            prefix = f"{field_name}="
-            contextual = redactor.redact_text(f"{prefix}{safe_value}").text
-            if contextual.startswith(prefix):
-                safe_value = contextual[len(prefix):]
-        return safe_value
-    if isinstance(value, dict):
-        return {
-            key: _redact_json_value(
-                item,
-                redactor=redactor,
-                field_name=key if isinstance(key, str) else None,
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_json_value(item, redactor=redactor, field_name=field_name) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_json_value(item, redactor=redactor, field_name=field_name) for item in value)
-    return value
 
 
 def create_skill_tool_set(runtime: str = "container"):
@@ -200,14 +170,16 @@ def prepare_execution_plan(
     task_id: str,
     runtime: str,
     review_input: dict[str, Any],
-    redactor: SecretRedactor,
+    boundary: RedactionBoundary | None = None,
+    redactor: SecretRedactor | None = None,
 ) -> Iterator[ExecutionPlan]:
+    if boundary is not None and redactor is not None:
+        raise ValueError("pass either boundary or redactor, not both")
+    active_boundary = boundary or RedactionBoundary(redactor=redactor)
     normalized_runtime = "container" if runtime == "auto" else runtime
     with tempfile.TemporaryDirectory(prefix="skills_code_review_input_") as tmp:
         input_path = Path(tmp) / "review_input.json"
-        safe_review_input = _redact_json_value(review_input, redactor=redactor)
-        serialized = json.dumps(safe_review_input, ensure_ascii=False, sort_keys=True)
-        cleaned = json.loads(serialized)
+        cleaned = active_boundary.clean(review_input)
         input_path.write_text(
             json.dumps(cleaned, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",

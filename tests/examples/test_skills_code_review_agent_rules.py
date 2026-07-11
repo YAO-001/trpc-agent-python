@@ -13,14 +13,15 @@ from agent.diff_parser import parse_unified_diff
 from agent.input_resolver import EXAMPLE_DIR
 from agent.models import Finding
 from agent.models import ReviewWarning
+from agent.redaction_boundary import RedactionBoundary
 from agent.rule_engine import RuleEngine
-from agent.secret_redactor import SecretRedactor
 
 
 def _run_fixture(name: str):
     diff = (EXAMPLE_DIR / "fixtures" / f"{name}.diff").read_text(encoding="utf-8")
-    redacted = SecretRedactor().redact_text(diff)
-    return RuleEngine().run(parse_unified_diff(redacted.text)), redacted
+    boundary = RedactionBoundary()
+    redacted = boundary.text(diff)
+    return RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary), redacted, boundary.summary
 
 
 def test_every_rule_category_is_covered_by_fixtures():
@@ -33,7 +34,7 @@ def test_every_rule_category_is_covered_by_fixtures():
             "db_lifecycle",
             "missing_tests",
     ]:
-        result, _ = _run_fixture(fixture)
+        result, _, _ = _run_fixture(fixture)
         categories.update(finding.category for finding in result.findings)
         warning_categories.update(warning.category for warning in result.warnings)
         warning_categories.update(warning.category for warning in result.needs_human_review)
@@ -43,7 +44,7 @@ def test_every_rule_category_is_covered_by_fixtures():
 
 
 def test_security_fixture_detects_all_security_patterns():
-    result, _ = _run_fixture("security")
+    result, _, _ = _run_fixture("security")
     titles = {finding.title for finding in result.findings}
 
     assert "subprocess invoked with shell=True" in titles
@@ -54,10 +55,10 @@ def test_security_fixture_detects_all_security_patterns():
 
 
 def test_secret_fixture_redacts_before_findings():
-    result, redacted = _run_fixture("secret_redaction")
+    result, redacted, summary = _run_fixture("secret_redaction")
 
-    assert redacted.summary.total_redactions >= 6
-    assert {"aws_access_key", "github_token", "openai_key", "jwt", "pem_private_key"}.issubset(redacted.summary.by_type)
+    assert summary.total_redactions >= 6
+    assert {"aws_access_key", "github_token", "openai_key", "jwt", "pem_private_key"}.issubset(summary.by_type)
     assert any(finding.category == "secret" for finding in result.findings)
     for raw in [
             "AKIAIOSFODNN7EXAMPLE",
@@ -68,19 +69,43 @@ def test_secret_fixture_redacts_before_findings():
         assert raw not in redacted.text
 
 
-def test_dummy_secret_not_high_confidence_finding():
+def test_dummy_secret_is_redacted_and_routes_to_low_confidence_review():
+    raw = "dummy-secret-for-tests"
     diff = """diff --git a/app/config.py b/app/config.py
 index 1111111..2222222 100644
 --- a/app/config.py
 +++ b/app/config.py
 @@ -1,2 +1,4 @@
-+token = "example-token"
-+password = "changeme"
++api_key = "dummy-secret-for-tests"
 """
-    redacted = SecretRedactor().redact_text(diff)
-    result = RuleEngine().run(parse_unified_diff(redacted.text))
+    boundary = RedactionBoundary()
+    redacted = boundary.text(diff)
+    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
 
+    assert raw not in redacted.text
     assert not any(finding.category == "secret" and finding.severity == "high" for finding in result.findings)
+    warning = next(item for item in result.needs_human_review if item.category == "secret")
+    assert warning.confidence == 0.58
+    assert raw not in warning.message
+
+
+def test_real_secret_routes_to_high_confidence_finding():
+    raw = "production-secret-value-987"
+    diff = """diff --git a/app/config.py b/app/config.py
+index 1111111..2222222 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,2 +1,4 @@
++client_secret = "production-secret-value-987"
+"""
+    boundary = RedactionBoundary()
+    redacted = boundary.text(diff)
+    result = RuleEngine().run(parse_unified_diff(redacted.text), boundary.summary)
+
+    assert raw not in redacted.text
+    finding = next(item for item in result.findings if item.category == "secret")
+    assert finding.confidence == 0.99
+    assert raw not in finding.evidence
 
 
 def test_deduplicate_same_file_line_category_keeps_highest_and_merges_sources():
@@ -115,7 +140,7 @@ def test_deduplicate_same_file_line_category_keeps_highest_and_merges_sources():
 
 
 def test_low_confidence_missing_tests_routes_to_warning():
-    result, _ = _run_fixture("missing_tests")
+    result, _, _ = _run_fixture("missing_tests")
 
     assert not result.findings
     assert any(warning.category == "test" and not warning.needs_human_review for warning in result.warnings)

@@ -15,13 +15,16 @@ from .diff_parser import is_test_file
 from .models import ChangedLine
 from .models import Finding
 from .models import ParsedDiff
+from .models import RedactionEvent
+from .models import RedactionSummary
 from .models import ReviewWarning
 from .rules_async_resource import run_async_resource_rules
 from .rules_database import run_database_rules
 from .rules_security import run_security_rules
 from .rules_tests import run_test_rules
+from .secret_redactor import SecretRedactor
 
-_PLACEHOLDER_RE = re.compile(r"\[REDACTED:SECRET:(?P<type>[^:\]]+):(?P<hash>[a-f0-9]{8})\]")
+_PLACEHOLDER_RE = SecretRedactor.PLACEHOLDER_RE
 
 
 def _is_fixture_file(path: str) -> bool:
@@ -38,15 +41,28 @@ class RuleEngineResult:
     debug_dropped_count: int = 0
 
 
-def _secret_findings(lines: list[ChangedLine]) -> list[Finding]:
+def _secret_findings(
+    lines: list[ChangedLine],
+    redaction_summary: RedactionSummary,
+) -> list[Finding]:
+    events: dict[tuple[str, str], list[RedactionEvent]] = {}
+    for event in redaction_summary.events:
+        events.setdefault((event.secret_type, event.sha256[:8]), []).append(event)
     findings: list[Finding] = []
     for line in lines:
-        match = _PLACEHOLDER_RE.search(line.content)
-        if not match:
+        matches = list(_PLACEHOLDER_RE.finditer(line.content))
+        if not matches:
             continue
         if is_test_file(line.file) or _is_fixture_file(line.file):
             continue
-        secret_type = match.group("type")
+
+        def is_likely_placeholder(match: re.Match[str]) -> bool:
+            matching_events = events.get((match.group("type"), match.group("hash")), [])
+            return len(matching_events) == 1 and matching_events[0].likely_placeholder
+
+        confidence = 0.58 if all(is_likely_placeholder(match) for match in matches) else 0.99
+        selected = next((match for match in matches if not is_likely_placeholder(match)), matches[0])
+        secret_type = selected.group("type")
         findings.append(
             Finding(
                 severity="high",
@@ -56,7 +72,7 @@ def _secret_findings(lines: list[ChangedLine]) -> list[Finding]:
                 title=f"{secret_type} secret added to source",
                 evidence=line.content.strip(),
                 recommendation="Remove the secret from source, rotate it, and load it from a managed secret store.",
-                confidence=0.99,
+                confidence=confidence,
                 source=["rule:secret", f"redactor:{secret_type}"],
             ))
     return findings
@@ -79,10 +95,14 @@ class RuleEngine:
     high_confidence_threshold = 0.80
     low_confidence_threshold = 0.50
 
-    def run(self, parsed_diff: ParsedDiff) -> RuleEngineResult:
+    def run(
+        self,
+        parsed_diff: ParsedDiff,
+        redaction_summary: RedactionSummary,
+    ) -> RuleEngineResult:
         raw_findings: list[Finding] = []
         raw_findings.extend(run_security_rules(parsed_diff.added_lines))
-        raw_findings.extend(_secret_findings(parsed_diff.added_lines))
+        raw_findings.extend(_secret_findings(parsed_diff.added_lines, redaction_summary))
         raw_findings.extend(run_async_resource_rules(parsed_diff.added_lines))
         raw_findings.extend(run_database_rules(parsed_diff.added_lines))
         raw_findings.extend(run_test_rules(parsed_diff))

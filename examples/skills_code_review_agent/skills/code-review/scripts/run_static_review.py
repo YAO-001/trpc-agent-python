@@ -23,7 +23,18 @@ _EVAL_EXEC_RE = re.compile(r"\b(?:eval|exec)\s*\(")
 _OS_SYSTEM_RE = re.compile(r"\bos\.system\s*\(")
 _OPEN_RE = re.compile(r"(?<![\w.])open\s*\(")
 _SQLALCHEMY_SESSION_RE = re.compile(r"(?<![A-Za-z0-9_])Session\s*\(")
-_SECRET_PLACEHOLDER_RE = re.compile(r"\[REDACTED:SECRET:([^:\]]+):[a-f0-9]{8}\]")
+_SECRET_TYPES = (
+    "pem_private_key",
+    "aws_access_key",
+    "github_token",
+    "openai_key",
+    "jwt",
+    "bearer_token",
+    "credential_url",
+    "generic_assignment",
+)
+_SECRET_TYPE_PATTERN = "|".join(map(re.escape, _SECRET_TYPES))
+_SECRET_PLACEHOLDER_RE = re.compile(rf"\[REDACTED:SECRET:(?P<type>{_SECRET_TYPE_PATTERN}):(?P<hash>[a-f0-9]{{8}})\]", )
 _GENERIC_SECRET_ASSIGNMENT_RE = re.compile(
     r"\b(?:password|passwd|token|api_key|apikey|secret)\b\s*=\s*['\"]([^'\"]{8,})['\"]",
     re.IGNORECASE,
@@ -31,16 +42,10 @@ _GENERIC_SECRET_ASSIGNMENT_RE = re.compile(
 _SQL_TOKEN_RE = re.compile(r"\b(select|insert|update|delete|where)\b", re.IGNORECASE)
 _SQL_NAMED_BIND_RE = re.compile(r":[A-Za-z_][A-Za-z0-9_]*")
 _PRODUCTION_PREFIXES = ("src/", "app/", "service/", "package/")
-_DUMMY_SECRET_MARKERS = (
-    "changeme",
-    "change-me",
-    "dummy",
-    "example",
-    "fixture",
-    "placeholder",
-    "sample",
-    "sk-test",
-    "test",
+_DUMMY_SECRET_MARKER_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:change-me|changeme|dummy|example|fixture|placeholder|sample|sk-test|tests?)"
+    r"(?:$|[^a-z0-9])",
+    re.IGNORECASE,
 )
 
 
@@ -178,8 +183,32 @@ def _is_pickle_loads_on_untrusted_data(lower: str) -> bool:
     return "pickle.loads(" in lower and _has_user_controlled_data(lower)
 
 
-def _looks_like_placeholder_secret(text: str) -> bool:
-    return _SECRET_PLACEHOLDER_RE.search(text) is not None
+def _placeholder_confidence(
+    text: str,
+    event_flags: dict[tuple[str, str], list[bool]],
+) -> float | None:
+    matches = list(_SECRET_PLACEHOLDER_RE.finditer(text))
+    if not matches:
+        return None
+    all_likely_placeholders = all(
+        len(flags) == 1 and flags[0] for match in matches
+        for flags in [event_flags.get((match.group("type"), match.group("hash")), [])])
+    return 0.58 if all_likely_placeholders else 0.99
+
+
+def _redaction_event_flags(payload: dict[str, Any]) -> dict[tuple[str, str], list[bool]]:
+    summary = payload.get("redaction_summary") or {}
+    if not isinstance(summary, dict):
+        return {}
+    flags: dict[tuple[str, str], list[bool]] = {}
+    for event in summary.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        secret_type = str(event.get("secret_type") or "")
+        digest = str(event.get("sha256") or "")
+        if secret_type and len(digest) >= 8:
+            flags.setdefault((secret_type, digest[:8]), []).append(bool(event.get("likely_placeholder")))
+    return flags
 
 
 def _secret_assignment_value(text: str) -> str | None:
@@ -191,7 +220,7 @@ def _secret_assignment_value(text: str) -> str | None:
 
 def _is_dummy_secret_value(value: str) -> bool:
     normalized = value.strip().lower()
-    return any(marker in normalized for marker in _DUMMY_SECRET_MARKERS)
+    return _DUMMY_SECRET_MARKER_RE.search(normalized) is not None
 
 
 def _looks_like_raw_secret_assignment(text: str) -> bool:
@@ -204,14 +233,14 @@ def _looks_like_low_confidence_secret_assignment(text: str) -> bool:
     return value is not None and _is_dummy_secret_value(value)
 
 
-def _secret_warning(line: dict[str, Any]) -> dict[str, Any]:
+def _secret_warning(line: dict[str, Any], *, confidence: float = 0.58) -> dict[str, Any]:
     return {
         "category": "secret",
         "title": "placeholder secret-like value added to production code",
         "message": "Secret-shaped test/example/changeme values should be confirmed as non-production credentials.",
         "file": _line_file(line),
         "line": _line_number(line),
-        "confidence": 0.58,
+        "confidence": confidence,
         "needs_human_review": False,
         "source": ["run_static_review.py", "skill-rule:low_confidence_secret"],
     }
@@ -222,6 +251,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
     changed_files = [str(path) for path in payload.get("changed_files", [])]
     findings: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    redaction_event_flags = _redaction_event_flags(payload)
 
     for line in lines:
         text = _line_text(line)
@@ -294,8 +324,23 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     rule_name="pickle_loads",
                 ))
         is_secret_test_context = _is_test_file(file_path) or _is_fixture_file(file_path)
-        if not is_secret_test_context and (_looks_like_placeholder_secret(text)
-                                           or _looks_like_raw_secret_assignment(text)):
+        placeholder_confidence = _placeholder_confidence(text, redaction_event_flags)
+        if not is_secret_test_context and placeholder_confidence is not None:
+            if placeholder_confidence >= 0.80:
+                findings.append(
+                    _finding(
+                        line,
+                        severity="high",
+                        category="secret",
+                        title="secret material added to source",
+                        recommendation=(
+                            "Remove the secret from source, rotate it, and load it from a managed secret store."),
+                        confidence=placeholder_confidence,
+                        rule_name="hardcoded_secret",
+                    ))
+            else:
+                warnings.append(_secret_warning(line, confidence=placeholder_confidence))
+        elif not is_secret_test_context and _looks_like_raw_secret_assignment(text):
             findings.append(
                 _finding(
                     line,
@@ -303,7 +348,7 @@ def _run_rules(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict
                     category="secret",
                     title="secret material added to source",
                     recommendation="Remove the secret from source, rotate it, and load it from a managed secret store.",
-                    confidence=0.96,
+                    confidence=0.99,
                     rule_name="hardcoded_secret",
                 ))
         elif not is_secret_test_context and _looks_like_low_confidence_secret_assignment(text):
