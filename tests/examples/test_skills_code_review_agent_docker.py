@@ -18,6 +18,18 @@ from trpc_agent_sdk.code_executors.container._container_cli import ContainerClie
 from trpc_agent_sdk.code_executors.container._container_cli import ContainerConfig
 
 
+def _assert_container_removed(docker_client, container_id: str) -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            docker_client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(f"container {container_id} remained inspectable")
+        time.sleep(0.05)
+
+
 @pytest.mark.docker_required
 def test_real_container_review_stages_executes_collects_and_persists(tmp_path):
     started = time.monotonic()
@@ -64,7 +76,7 @@ async def test_live_container_limits_and_termination(tmp_path):
         timeout_pid = "/tmp/issue92-timeout.pid"
         timeout_code = ("import os,pathlib,time;"
                         f"pathlib.Path({timeout_pid!r}).write_text(str(os.getpid()));time.sleep(30)")
-        timeout = await client.exec_run(["python3", "-c", timeout_code], CommandArgs(timeout=0.05))
+        timeout = await client.exec_run(["python3", "-c", timeout_code], CommandArgs(timeout=1))
         assert timeout.failure_kind == "execution_timeout"
         assert timeout.termination_confirmed is True
         assert_pid_dead(timeout_pid)
@@ -111,8 +123,7 @@ async def test_live_container_limits_and_termination(tmp_path):
         docker_client = client.client
         client.close()
         if container_id:
-            with pytest.raises(docker.errors.NotFound):
-                docker_client.containers.get(container_id)
+            _assert_container_removed(docker_client, container_id)
 
 
 @pytest.mark.docker_required
@@ -145,8 +156,7 @@ def test_review_orchestration_removes_owned_container(tmp_path, monkeypatch, pub
 
     assert len(observed) == 1
     container_id, docker_client = observed[0]
-    with pytest.raises(docker.errors.NotFound):
-        docker_client.containers.get(container_id)
+    _assert_container_removed(docker_client, container_id)
 
 
 def test_design_contains_300_to_500_han_characters():

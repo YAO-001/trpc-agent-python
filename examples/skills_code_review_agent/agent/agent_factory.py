@@ -35,6 +35,7 @@ REVIEW_CONTAINER_HOST_CONFIG = {
     "memswap_limit": "256m",
     "nano_cpus": 1_000_000_000,
     "pids_limit": 64,
+    "init": True,
     "read_only": True,
     "tmpfs": {
         "/tmp": "rw,nosuid,nodev,noexec,size=64m",

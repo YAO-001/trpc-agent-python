@@ -20,10 +20,12 @@ import os
 import posixpath
 import tarfile
 import time
+import docker
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from typing import Dict
 from typing import List
@@ -73,6 +75,25 @@ from ..utils import normalize_globs
 from ._container_cli import CommandArgs
 from ._container_cli import ContainerClient
 from ._container_cli import ContainerConfig
+
+_SAFE_TAR_EXTRACT_SCRIPT = ("import io,os,sys,tarfile;"
+                            "data=sys.stdin.buffer.read(int(sys.argv[1]));root=os.path.realpath(sys.argv[2]);"
+                            "t=tarfile.open(fileobj=io.BytesIO(data));members=t.getmembers();"
+                            "bad=[m.name for m in members if not (m.isfile() or m.isdir()) or "
+                            "os.path.isabs(m.name.replace('\\\\','/')) or "
+                            "os.path.commonpath([root,os.path.realpath(os.path.join(root,m.name))])!=root];"
+                            "bad and sys.exit(64);t.extractall(root,members=members)")
+
+
+def _validate_staging_tar(buffer: io.BytesIO) -> None:
+    """Reject archive members that could escape or alias the destination."""
+    buffer.seek(0)
+    with tarfile.open(fileobj=buffer, mode="r:*") as archive:
+        for member in archive.getmembers():
+            path = PurePosixPath(member.name.replace("\\", "/"))
+            if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+                raise ValueError(f"unsafe staging archive member: {member.name}")
+    buffer.seek(0)
 
 
 class _IteratorReader(io.RawIOBase):
@@ -303,9 +324,21 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
             return
 
         tar_stream = self._create_tar_from_files(files)
-        success = self.container.client.api.put_archive(self.container.container.id, ws.path, tar_stream)
-
-        if not success:
+        try:
+            if self.container.client.api.put_archive(self.container.container.id, ws.path, tar_stream):
+                logger.info("Put %s files into workspace %s", len(files), ws.path)
+                return
+            raise RuntimeError("Failed to put files into container")
+        except docker.errors.NotFound:
+            tar_stream.seek(0)
+        _validate_staging_tar(tar_stream)
+        payload = tar_stream.getvalue()
+        result = await self.container.exec_run(
+            cmd=["python3", "-c", _SAFE_TAR_EXTRACT_SCRIPT,
+                 str(len(payload)), ws.path],
+            command_args=CommandArgs(stdin=payload, close_stdin=False),
+        )
+        if result.exit_code != 0:
             raise RuntimeError("Failed to put files into container")
 
         logger.info("Put %s files into workspace %s", len(files), ws.path)
@@ -588,10 +621,21 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
             tar.add(abs_src, arcname='.')
 
         tar_stream.seek(0)
-        success = self.container.client.api.put_archive(self.container.container.id, container_dst, tar_stream)
-
-        if not success:
+        try:
+            if self.container.client.api.put_archive(self.container.container.id, container_dst, tar_stream):
+                return
             raise RuntimeError(f"Failed to copy directory {src} to {container_dst}")
+        except docker.errors.NotFound:
+            tar_stream.seek(0)
+        _validate_staging_tar(tar_stream)
+        payload = tar_stream.getvalue()
+        result = await self.container.exec_run(
+            cmd=["python3", "-c", _SAFE_TAR_EXTRACT_SCRIPT,
+                 str(len(payload)), container_dst],
+            command_args=CommandArgs(stdin=payload, close_stdin=False),
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"Failed to copy directory {src} to {container_dst}: {result.stderr}")
 
     async def _put_bytes_tar(self, data: bytes, dest: str, mode: int = 0o644) -> None:
         """Copy bytes to container using tar."""
@@ -614,9 +658,21 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         result = await self.container.exec_run(cmd=cmd, command_args=self.config.command_args)
         if result.exit_code:
             raise RuntimeError(f"Failed to stage directory: {result.stderr}")
-        success = self.container.client.api.put_archive(self.container.container.id, parent, tar_buffer)
-        if not success:
+        try:
+            if self.container.client.api.put_archive(self.container.container.id, parent, tar_buffer):
+                return
             raise RuntimeError(f"Failed to copy bytes to {dest}")
+        except docker.errors.NotFound:
+            tar_buffer.seek(0)
+        _validate_staging_tar(tar_buffer)
+        payload = tar_buffer.getvalue()
+        result = await self.container.exec_run(
+            cmd=["python3", "-c", _SAFE_TAR_EXTRACT_SCRIPT,
+                 str(len(payload)), parent],
+            command_args=CommandArgs(stdin=payload, close_stdin=False),
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"Failed to copy bytes to {dest}: {result.stderr}")
 
     async def _stage_host_input(self, ws: WorkspaceInfo, host: str, dst: str, mode: str, dst_rel: str) -> None:
         """Stage input from host path."""
@@ -680,19 +736,36 @@ class ContainerWorkspaceFS(BaseWorkspaceFS):
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
             raise ValueError("max_bytes must be a non-negative integer")
         try:
-            stream, _ = self.container.client.api.get_archive(self.container.container.id, full_path)
-            with io.BufferedReader(_IteratorReader(stream)) as reader, tarfile.open(fileobj=reader, mode='r|*') as tar:
-                for member in tar:
-                    if member.isfile():
-                        f = tar.extractfile(member)
-                        if f is None:
-                            continue
-                        data = f.read(max_bytes)
-                        mime = self._detect_mime_type(data)
-                        return data, member.size, mime
-
-            raise RuntimeError(f"No file found in archive: {full_path}")
-
+            try:
+                stream, _ = self.container.client.api.get_archive(self.container.container.id, full_path)
+                with io.BufferedReader(_IteratorReader(stream)) as reader, tarfile.open(fileobj=reader,
+                                                                                        mode='r|*') as tar:
+                    for member in tar:
+                        if member.isfile():
+                            fileobj = tar.extractfile(member)
+                            if fileobj is not None:
+                                data = fileobj.read(max_bytes)
+                                return data, member.size, self._detect_mime_type(data)
+                raise RuntimeError(f"No file found in archive: {full_path}")
+            except docker.errors.NotFound:
+                pass
+            script = ("import os,struct,sys;"
+                      "p=sys.argv[1];n=int(sys.argv[2]);"
+                      "s=os.stat(p).st_size;"
+                      "sys.stdout.buffer.write(struct.pack('>Q',s));"
+                      "f=open(p,'rb');sys.stdout.buffer.write(f.read(n))")
+            result = self.container.container.exec_run(["python3", "-c", script, full_path, str(max_bytes)])
+            if result.exit_code != 0:
+                raise RuntimeError(f"container file read exited {result.exit_code}")
+            output = result.output
+            if isinstance(output, tuple):
+                output = output[0]
+            raw = bytes(output or b"")
+            if len(raw) < 8:
+                raise RuntimeError("container file read omitted its size header")
+            raw_size = int.from_bytes(raw[:8], "big")
+            data = raw[8:8 + max_bytes]
+            return data, raw_size, self._detect_mime_type(data)
         except Exception as ex:  # pylint: disable=broad-except
             logger.error("Failed to copy file out: %s", ex)
             raise RuntimeError(f"Failed to copy file {full_path}: {ex}")

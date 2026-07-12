@@ -29,7 +29,9 @@ from trpc_agent_sdk.log import logger
 DEFAULT_IMAGE_TAG = 'python:3-slim'
 _DEFAULT_STREAM_LIMIT_BYTES = 16 * 1024
 _CONTROL_POLL_SECONDS = 0.01
-_CONTROL_READY_SECONDS = 0.2
+# A control-file read is itself a Docker exec. Desktop/remote daemons can take
+# longer than 200 ms to start that probe even though the supervisor is ready.
+_CONTROL_READY_SECONDS = 2.0
 _READER_GRACE_SECONDS = 1.0
 
 
@@ -55,8 +57,9 @@ class CommandArgs:
     """The environment variables for the command execution."""
     timeout: Optional[float] = None
     """The timeout for the command execution in seconds."""
-    stdin: Optional[str] = None
+    stdin: Optional[str | bytes] = None
     """Optional stdin content to write once before reading output."""
+    close_stdin: bool = True
     stdout_limit_bytes: int = 0
     stderr_limit_bytes: int = 0
     output_globs: tuple[str, ...] = ()
@@ -248,6 +251,7 @@ class ContainerClient:
         working_dir = self.host_config.get("working_dir", "/")
         network_mode = self.host_config.get("network_mode", "none")
         auto_remove = self.host_config.get("auto_remove", True)
+        self._auto_remove = bool(auto_remove)
         for key in (
                 "mem_limit",
                 "memswap_limit",
@@ -264,6 +268,8 @@ class ContainerClient:
         run_kwargs.setdefault("working_dir", working_dir)
         run_kwargs.setdefault("network_mode", network_mode)
         run_kwargs.setdefault("auto_remove", auto_remove)
+        if self.host_config.get("init"):
+            run_kwargs.setdefault("init", True)
         self._container = self._client.containers.run(
             image=self.image,
             detach=True,
@@ -320,12 +326,13 @@ class ContainerClient:
             pass
         except Exception as exc:  # pylint: disable=broad-except
             failures.append(exc)
-        try:
-            container.remove()
-        except docker.errors.NotFound:
-            pass
-        except Exception as exc:  # pylint: disable=broad-except
-            failures.append(exc)
+        if not getattr(self, "_auto_remove", False):
+            try:
+                container.remove()
+            except docker.errors.NotFound:
+                pass
+            except Exception as exc:  # pylint: disable=broad-except
+                failures.append(exc)
         if failures:
             raise RuntimeError(f"container cleanup failed: {failures[0]}") from failures[0]
         self._container = None
@@ -368,8 +375,13 @@ class ContainerClient:
             " high[0]=max(high[0],size); return size\n"
             "def absent():\n"
             " for _ in range(50):\n"
-            "  try: os.killpg(c.pid,0)\n"
-            "  except ProcessLookupError: return True\n"
+            "  live=False\n"
+            "  for path in glob.glob('/proc/[0-9]*/stat'):\n"
+            "   try:\n"
+            "    fields=open(path).read().rsplit(')',1)[1].split()\n"
+            "    if int(fields[2])==c.pid and fields[0]!='Z': live=True; break\n"
+            "   except (OSError,ValueError,IndexError): pass\n"
+            "  if not live: return True\n"
             "  time.sleep(.01)\n"
             " return False\n"
             "def kill(value):\n"
@@ -397,15 +409,20 @@ class ContainerClient:
     def _terminate_exec_group(self, pid_file: str) -> bool:
         if not pid_file:
             return False
-        script = ("import os,signal,sys,time\n"
+        script = ("import glob,os,signal,sys,time\n"
                   "try: p=int(open(sys.argv[1]).read())\n"
                   "except (FileNotFoundError,ValueError): sys.exit(1)\n"
                   "if p<=0: sys.exit(1)\n"
                   "try: os.killpg(p,signal.SIGKILL)\n"
                   "except ProcessLookupError: sys.exit(0)\n"
-                  "for _ in range(50):\n"
-                  " try: os.killpg(p,0)\n"
-                  " except ProcessLookupError: sys.exit(0)\n"
+                  "for _ in range(200):\n"
+                  " live=False\n"
+                  " for path in glob.glob('/proc/[0-9]*/stat'):\n"
+                  "  try:\n"
+                  "   fields=open(path).read().rsplit(')',1)[1].split()\n"
+                  "   if int(fields[2])==p and fields[0]!='Z': live=True; break\n"
+                  "  except (OSError,ValueError,IndexError): pass\n"
+                  " if not live: sys.exit(0)\n"
                   " time.sleep(.01)\n"
                   "sys.exit(2)")
         try:
@@ -432,13 +449,16 @@ class ContainerClient:
     def _exec_group_absent(self, pid_file: str) -> bool:
         if not pid_file:
             return False
-        script = ("import os,sys\n"
+        script = ("import glob,os,sys\n"
                   "try: p=int(open(sys.argv[1]).read())\n"
                   "except (FileNotFoundError,ValueError): sys.exit(1)\n"
                   "if p<=0: sys.exit(1)\n"
-                  "try: os.killpg(p,0)\n"
-                  "except ProcessLookupError: sys.exit(0)\n"
-                  "sys.exit(1)")
+                  "for path in glob.glob('/proc/[0-9]*/stat'):\n"
+                  " try:\n"
+                  "  fields=open(path).read().rsplit(')',1)[1].split()\n"
+                  "  if int(fields[2])==p and fields[0]!='Z': sys.exit(1)\n"
+                  " except (OSError,ValueError,IndexError): pass\n"
+                  "sys.exit(0)")
         try:
             return self.container.exec_run(["python3", "-c", script, pid_file]).exit_code == 0
         except Exception:  # pylint: disable=broad-except
@@ -558,18 +578,20 @@ class ContainerClient:
 
             def write_stdin():
                 try:
-                    data = (args.stdin or "").encode("utf-8")
+                    raw_stdin = args.stdin or b""
+                    data = raw_stdin if isinstance(raw_stdin, bytes) else raw_stdin.encode("utf-8")
                     if data:
                         sendall = getattr(sock, "sendall", None)
                         if not callable(sendall):
                             sendall = sock._sock.sendall  # pylint: disable=protected-access
                         sendall(data)
-                    try:
-                        sock.shutdown(pysocket.SHUT_WR)
-                    except Exception:  # pylint: disable=broad-except
-                        close_write = getattr(sock, "close_write", None)
-                        if callable(close_write):
-                            close_write()
+                    if args.close_stdin:
+                        try:
+                            sock.shutdown(pysocket.SHUT_WR)
+                        except Exception:  # pylint: disable=broad-except
+                            close_write = getattr(sock, "close_write", None)
+                            if callable(close_write):
+                                close_write()
                 except BaseException as exc:  # pylint: disable=broad-except
                     writer_error.append(exc)
                     if not self._terminate_exec_group(pid_file):
@@ -592,7 +614,6 @@ class ContainerClient:
                                                stdout_limit_bytes=stdout_limit,
                                                stderr_limit_bytes=stderr_limit,
                                                terminate=terminate)
-            self._close_exec_socket(sock)
             if writer:
                 writer.join(timeout=_READER_GRACE_SECONDS)
                 if writer.is_alive():
@@ -604,6 +625,8 @@ class ContainerClient:
                     raise RuntimeError("container stdin writer did not finish")
             if writer_error:
                 raise RuntimeError(f"failed to write container stdin: {writer_error[0]}")
+            self._wait_exec_stopped(exec_id)
+            self._close_exec_socket(sock)
             inspect = self.container.client.api.exec_inspect(exec_id)
             running = bool(inspect.get("Running"))
             reason = self._read_control_file(reason_file)
@@ -699,9 +722,7 @@ class ContainerClient:
             if observed_reason not in {"", "output_limit_exceeded", "orchestration_error"}:
                 observed_reason = "orchestration_error"
             failure = "execution_timeout" if confirmed else "orchestration_error"
-            if observed_reason == "orchestration_error":
-                failure = "orchestration_error"
-            elif observed_reason == "output_limit_exceeded" and confirmed:
+            if observed_reason == "output_limit_exceeded" and confirmed:
                 return ContainerExecResult(
                     result.stdout if result is not None else "",
                     result.stderr if result is not None else "",

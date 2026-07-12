@@ -52,6 +52,7 @@ from trpc_agent_sdk.code_executors.container._container_ws_runtime import (
     ContainerWorkspaceManager,
     ContainerWorkspaceRuntime,
     RuntimeConfig,
+    _validate_staging_tar,
     _shell_quote,
     create_container_workspace_runtime,
 )
@@ -78,6 +79,22 @@ def _mock_container_client():
     cc.container = MagicMock()
     cc.container.id = "ctr-1"
     return cc
+
+
+@pytest.mark.parametrize("name,kind", [("../escape", "file"), ("link", "symlink")])
+def test_validate_staging_tar_rejects_escape_and_link_members(name, kind):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo(name)
+        if kind == "symlink":
+            member.type = tarfile.SYMTYPE
+            member.linkname = "../escape"
+        else:
+            member.size = 1
+        archive.addfile(member, io.BytesIO(b"x") if member.isfile() else None)
+
+    with pytest.raises(ValueError, match="unsafe staging archive member"):
+        _validate_staging_tar(buffer)
 
 
 def _make_ws(exec_id="test", path="/tmp/run/ws_test_123"):
